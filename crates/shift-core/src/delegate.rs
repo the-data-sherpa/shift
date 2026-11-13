@@ -51,12 +51,25 @@ pub enum Answer {
     Declined,
 }
 
+impl Answer {
+    pub fn label(self) -> &'static str {
+        match self {
+            Answer::Fixed => "fixed",
+            Answer::Disagree => "disagree",
+            Answer::Declined => "declined",
+        }
+    }
+}
+
 pub fn delegate_task_spec() -> ToolSpec {
     let text = |description: &str| json!({"type": "string", "description": description});
     ToolSpec {
         name: DELEGATE_TASK,
         description: "Have the reviewer review your current change. Blocks until the review \
-                      is done, which can take several minutes. Returns the review as JSON.",
+                      is done, which can take several minutes. Returns the review as JSON, \
+                      with `ended` and `rounds_left`. If `ended` is false, answer every \
+                      finding in `ledger` on your next call. A result with `stuck` is the \
+                      end: stop and report both sides to the user.",
         input_schema: json!({
             "type": "object",
             "additionalProperties": false,
