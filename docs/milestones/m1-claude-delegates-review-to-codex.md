@@ -93,8 +93,9 @@ You use it for a **small real task from shift's own backlog**, not a demo
   reviewer is told to flag any mismatch between your request and the coder's
   intent.
 - **Blocking.** The call waits for the review. Set `MCP_TOOL_TIMEOUT` high at
-  launch. Fall back to a task id plus `task_status` only if the step 2 spike
-  fails.
+  launch. The step 2 spike passed: a stub call that blocked for 10 minutes
+  returned its review and Claude continued the turn (Claude Code 2.1.325,
+  `MCP_TOOL_TIMEOUT` of 30 minutes), so there is no task id or `task_status`.
 - **Rounds:** at most 3, enforced by shift. Stop early when a round returns
   only nits. A finding still disputed after two replies, or a spent budget,
   is **Stuck**: shift returns that to the coder, and the coder pane shows it
