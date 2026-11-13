@@ -5,7 +5,8 @@ use shift_adapter_claude::{Translator, launch_args};
 use shift_core::{Event, builtin_agent};
 
 fn replay(transcript: &str) -> (Vec<Event>, Vec<serde_json::Value>) {
-    let mut translator = Translator::new(builtin_agent("coder").unwrap());
+    let tools = [shift_core::delegate::delegate_task_spec()];
+    let mut translator = Translator::new(builtin_agent("coder").unwrap(), &tools);
     let (mut events, mut replies) = (Vec::new(), Vec::new());
     for line in transcript.lines() {
         let output = translator.handle_line(line);
@@ -105,6 +106,7 @@ fn launch_limits_built_in_tools_to_the_agents_list() {
     let args = launch_args(&agent).unwrap();
     let tools = args.iter().position(|a| a == "--tools").unwrap();
     assert_eq!(args[tools + 1], "Read,Glob,Grep,Edit,Write,Bash");
+    assert!(args.contains(&"--strict-mcp-config".to_string()));
 
     agent.tools = vec!["fs.read".into()];
     let args = launch_args(&agent).unwrap();
@@ -112,4 +114,107 @@ fn launch_limits_built_in_tools_to_the_agents_list() {
 
     agent.tools = vec!["web.search".into()];
     assert!(launch_args(&agent).is_err());
+}
+
+/// Frames as Claude Code 2.1.325 sends them for the in-process shift server.
+#[test]
+fn shift_tools_are_served_over_the_control_channel() {
+    let mcp = |request_id: &str, message: serde_json::Value| {
+        json!({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": {"subtype": "mcp_message", "server_name": "shift", "message": message},
+        })
+        .to_string()
+    };
+    let arguments =
+        json!({"intent": "i", "out_of_scope": "o", "change_summary": "c", "checks": "k"});
+    let transcript = [
+        mcp("a", json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}})),
+        mcp("b", json!({"jsonrpc": "2.0", "method": "notifications/initialized"})),
+        mcp("c", json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})),
+        json!({
+            "type": "control_request",
+            "request_id": "d",
+            "request": {"subtype": "can_use_tool", "tool_name": "mcp__shift__delegate_task", "input": arguments},
+        })
+        .to_string(),
+        mcp("e", json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "delegate_task", "arguments": arguments}})),
+    ]
+    .join("\n");
+
+    let mut translator = Translator::new(
+        builtin_agent("coder").unwrap(),
+        &[shift_core::delegate::delegate_task_spec()],
+    );
+    let (mut events, mut replies, mut calls) = (Vec::new(), Vec::new(), Vec::new());
+    for line in transcript.lines() {
+        let output = translator.handle_line(line);
+        events.extend(output.events);
+        replies.extend(output.replies);
+        calls.extend(output.calls);
+    }
+
+    let reply = |i: usize| &replies[i]["response"]["response"];
+    assert_eq!(reply(0)["mcp_response"]["id"], 0);
+    assert_eq!(
+        reply(0)["mcp_response"]["result"]["protocolVersion"],
+        "2025-11-25"
+    );
+    assert_eq!(
+        reply(1)["mcp_response"],
+        json!({"jsonrpc": "2.0", "result": {}})
+    );
+    let listed = &reply(2)["mcp_response"]["result"]["tools"];
+    assert_eq!(listed[0]["name"], "delegate_task");
+    assert_eq!(
+        listed[0]["inputSchema"]["required"],
+        json!(["intent", "out_of_scope", "change_summary", "checks"])
+    );
+    assert!(listed[0]["inputSchema"]["properties"]["ledger"].is_object());
+    assert_eq!(reply(3)["behavior"], "allow");
+    assert_eq!(
+        events,
+        [Event::PermissionRequest {
+            tool: "mcp__shift__delegate_task".into(),
+            allowed: true
+        }]
+    );
+
+    // The call itself is not answered inline: it blocks, so it runs elsewhere.
+    assert_eq!(replies.len(), 4);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        (calls[0].name.as_str(), &calls[0].arguments),
+        ("delegate_task", &arguments)
+    );
+
+    let done = shift_adapter_claude::tool_reply(&calls[0], Ok("review".into()));
+    assert_eq!(done["response"]["request_id"], "e");
+    assert_eq!(
+        done["response"]["response"]["mcp_response"],
+        json!({"jsonrpc": "2.0", "id": 2, "result": {"content": [{"type": "text", "text": "review"}], "isError": false}})
+    );
+    let failed = shift_adapter_claude::tool_reply(&calls[0], Err("boom".into()));
+    assert_eq!(
+        failed["response"]["response"]["mcp_response"]["result"]["isError"],
+        true
+    );
+}
+
+#[test]
+fn gate_denies_an_mcp_tool_shift_does_not_serve() {
+    let prompt = json!({
+        "type": "control_request",
+        "request_id": "r1",
+        "request": {"subtype": "can_use_tool", "tool_name": "mcp__shift__other", "input": {}},
+    });
+    let (events, _) = replay(&prompt.to_string());
+    assert_eq!(
+        events,
+        [Event::PermissionRequest {
+            tool: "mcp__shift__other".into(),
+            allowed: false
+        }]
+    );
 }

@@ -1,6 +1,7 @@
 //! Domain types for shift. See `CONTEXT.md` for vocabulary.
 
 pub mod agent;
+pub mod delegate;
 pub mod event;
 pub mod git;
 pub mod harness;
@@ -8,6 +9,7 @@ pub mod policy;
 pub mod session;
 
 pub use agent::{AgentDef, AgentLimits, LoadError, builtin_agent, load_agents_dir};
+pub use delegate::{ToolServer, ToolSpec};
 pub use event::Event;
 pub use git::{WorkBranch, start_work_branch};
 pub use harness::Harness;

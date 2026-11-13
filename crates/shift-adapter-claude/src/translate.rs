@@ -2,7 +2,7 @@
 //! owes Claude. It does no I/O, so a saved transcript replays through it.
 
 use serde_json::{Value, json};
-use shift_core::{AgentDef, Event, policy};
+use shift_core::{AgentDef, Event, ToolSpec, policy};
 
 use crate::shift_tool;
 
@@ -12,15 +12,42 @@ pub struct Output {
     pub events: Vec<Event>,
     /// Frames to write back to Claude's stdin.
     pub replies: Vec<Value>,
+    /// Shift tool calls to run. They may block, so the caller runs them off
+    /// the reader thread and answers each with [`tool_reply`].
+    pub calls: Vec<ToolCall>,
 }
+
+/// A shift tool call Claude is waiting on.
+#[derive(Debug, PartialEq)]
+pub struct ToolCall {
+    request_id: Value,
+    mcp_id: Value,
+    pub name: String,
+    pub arguments: Value,
+}
+
+/// The name Claude gives the in-process shift MCP server.
+pub const SERVER: &str = "shift";
 
 pub struct Translator {
     agent: AgentDef,
+    /// The shift tools served to this session, as MCP tool definitions.
+    tools: Vec<Value>,
 }
 
 impl Translator {
-    pub fn new(agent: AgentDef) -> Self {
-        Self { agent }
+    pub fn new(agent: AgentDef, tools: &[ToolSpec]) -> Self {
+        let tools = tools
+            .iter()
+            .map(|t| json!({"name": t.name, "description": t.description, "inputSchema": t.input_schema}))
+            .collect();
+        Self { agent, tools }
+    }
+
+    fn serves(&self, claude_tool: &str) -> bool {
+        claude_tool
+            .strip_prefix("mcp__shift__")
+            .is_some_and(|name| self.tools.iter().any(|t| t["name"] == name))
     }
 
     pub fn handle_line(&mut self, line: &str) -> Output {
@@ -84,7 +111,8 @@ impl Translator {
         let response = match request["subtype"].as_str() {
             Some("can_use_tool") => {
                 let tool = string(&request["tool_name"]);
-                let allowed = policy::allows(&self.agent, shift_tool(&tool));
+                // shift's own tools are always the agent's to call.
+                let allowed = self.serves(&tool) || policy::allows(&self.agent, shift_tool(&tool));
                 let response = if allowed {
                     json!({"behavior": "allow", "updatedInput": request["input"]})
                 } else {
@@ -96,17 +124,59 @@ impl Translator {
                 out.events.push(Event::PermissionRequest { tool, allowed });
                 response
             }
+            Some("mcp_message") => {
+                let message = &request["message"];
+                let result = match message["method"].as_str() {
+                    Some("initialize") => json!({
+                        "protocolVersion": message["params"]["protocolVersion"],
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": SERVER, "version": env!("CARGO_PKG_VERSION")},
+                    }),
+                    Some("tools/list") => json!({"tools": self.tools}),
+                    Some("tools/call") => {
+                        out.calls.push(ToolCall {
+                            request_id: frame["request_id"].clone(),
+                            mcp_id: message["id"].clone(),
+                            name: string(&message["params"]["name"]),
+                            arguments: message["params"]["arguments"].clone(),
+                        });
+                        return;
+                    }
+                    // Notifications and anything else get an empty result.
+                    _ => json!({}),
+                };
+                mcp_response(&message["id"], result)
+            }
             _ => return,
         };
-        out.replies.push(json!({
-            "type": "control_response",
-            "response": {
-                "subtype": "success",
-                "request_id": frame["request_id"],
-                "response": response,
-            },
-        }));
+        out.replies
+            .push(control_response(&frame["request_id"], response));
     }
+}
+
+/// The frame that answers a shift tool call with its result.
+pub fn tool_reply(call: &ToolCall, result: Result<String, String>) -> Value {
+    let (text, is_error) = match result {
+        Ok(text) => (text, false),
+        Err(text) => (text, true),
+    };
+    let result = json!({"content": [{"type": "text", "text": text}], "isError": is_error});
+    control_response(&call.request_id, mcp_response(&call.mcp_id, result))
+}
+
+fn mcp_response(id: &Value, result: Value) -> Value {
+    let mut response = json!({"jsonrpc": "2.0", "result": result});
+    if !id.is_null() {
+        response["id"] = id.clone();
+    }
+    json!({"mcp_response": response})
+}
+
+fn control_response(request_id: &Value, response: Value) -> Value {
+    json!({
+        "type": "control_response",
+        "response": {"subtype": "success", "request_id": request_id, "response": response},
+    })
 }
 
 fn content(frame: &Value) -> impl Iterator<Item = &Value> {
