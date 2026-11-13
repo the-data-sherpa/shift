@@ -1,8 +1,9 @@
 //! The clean start for a coder session: every diff later reviewed is the
 //! coder's alone, on its own branch with a known base.
 
+use std::ffi::OsStr;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Where a coder session's work lands.
@@ -33,11 +34,75 @@ pub fn start_work_branch(repo: &Path, slug: &str) -> io::Result<WorkBranch> {
     Ok(WorkBranch { base, branch })
 }
 
+/// The coder's working tree, frozen for one review.
+#[derive(Debug)]
+pub struct Snapshot {
+    repo: PathBuf,
+    /// The commit holding the snapshot. No branch points at it.
+    pub commit: String,
+    /// A temporary worktree with the snapshot checked out.
+    pub worktree: PathBuf,
+}
+
+/// Commit the working tree of `repo` (tracked changes plus untracked,
+/// non-ignored files) without touching its branch or index, and check that
+/// commit out as a detached worktree at `worktree`.
+pub fn snapshot(repo: &Path, worktree: &Path) -> io::Result<Snapshot> {
+    // A scratch index keeps the coder's own index as it is.
+    let index = worktree.with_extension("index");
+    let index_env = [("GIT_INDEX_FILE", index.as_os_str())];
+    let commit = (|| {
+        git_env(repo, &["read-tree", "HEAD"], &index_env)?;
+        git_env(repo, &["add", "--all"], &index_env)?;
+        let tree = git_env(repo, &["write-tree"], &index_env)?;
+        git(
+            repo,
+            &[
+                "-c",
+                "user.name=shift",
+                "-c",
+                "user.email=shift@localhost",
+                "commit-tree",
+                &tree,
+                "-p",
+                "HEAD",
+                "-m",
+                "shift review snapshot",
+            ],
+        )
+    })();
+    let _ = std::fs::remove_file(&index);
+    let commit = commit?;
+    let path = worktree.to_string_lossy();
+    git(
+        repo,
+        &["worktree", "add", "--quiet", "--detach", &path, &commit],
+    )?;
+    Ok(Snapshot {
+        repo: repo.to_owned(),
+        commit,
+        worktree: worktree.to_owned(),
+    })
+}
+
+impl Drop for Snapshot {
+    /// The worktree only lives for one review.
+    fn drop(&mut self) {
+        let path = self.worktree.to_string_lossy();
+        let _ = git(&self.repo, &["worktree", "remove", "--force", &path]);
+    }
+}
+
 /// Run `git` in `repo` and return its trimmed stdout, or its stderr as the
 /// error.
 fn git(repo: &Path, args: &[&str]) -> io::Result<String> {
+    git_env(repo, args, &[])
+}
+
+fn git_env(repo: &Path, args: &[&str], env: &[(&str, &OsStr)]) -> io::Result<String> {
     let output = Command::new("git")
         .args(args)
+        .envs(env.iter().copied())
         .current_dir(repo)
         .output()
         .map_err(|e| io::Error::new(e.kind(), format!("could not run `git`: {e}")))?;
@@ -52,16 +117,16 @@ fn git(repo: &Path, args: &[&str]) -> io::Result<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::path::PathBuf;
 
     use super::*;
 
     /// A temp directory removed on drop.
-    struct Temp(PathBuf);
+    pub(crate) struct Temp(pub(crate) PathBuf);
 
     impl Temp {
-        fn new(name: &str) -> Self {
+        pub(crate) fn new(name: &str) -> Self {
             let dir = std::env::temp_dir().join(format!("shift-git-{}-{name}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
@@ -76,7 +141,7 @@ mod tests {
     }
 
     /// A repo with one commit, on branch `feature`.
-    fn repo(name: &str) -> Temp {
+    pub(crate) fn repo(name: &str) -> Temp {
         let temp = Temp::new(name);
         let dir = &temp.0;
         git(dir, &["init", "--quiet", "--initial-branch=feature"]).unwrap();
@@ -153,6 +218,45 @@ mod tests {
         std::fs::create_dir(temp.0.join("target")).unwrap();
         std::fs::write(temp.0.join("target/out"), "x").unwrap();
         assert!(start_work_branch(&temp.0, "abc12345").is_ok());
+    }
+
+    #[test]
+    fn snapshot_holds_the_working_tree_and_leaves_the_checkout_alone() {
+        let temp = repo("snapshot");
+        let dir = &temp.0;
+        std::fs::write(dir.join(".git/info/exclude"), "target/\n").unwrap();
+        std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
+        std::fs::write(dir.join("new.txt"), "new\n").unwrap();
+        std::fs::create_dir(dir.join("target")).unwrap();
+        std::fs::write(dir.join("target/out"), "x").unwrap();
+        let head = git(dir, &["rev-parse", "HEAD"]).unwrap();
+        let status = git(dir, &["status", "--porcelain"]).unwrap();
+        let worktree = Temp::new("snapshot-wt");
+        std::fs::remove_dir(&worktree.0).unwrap();
+
+        let snap = snapshot(dir, &worktree.0).unwrap();
+
+        // The snapshot has tracked changes and untracked files, not ignored ones.
+        let read = |name: &str| std::fs::read_to_string(worktree.0.join(name));
+        assert_eq!(read("a.txt").unwrap(), "changed\n");
+        assert_eq!(read("new.txt").unwrap(), "new\n");
+        assert!(read("target/out").is_err());
+        assert_eq!(
+            git(&worktree.0, &["rev-parse", "HEAD"]).unwrap(),
+            snap.commit
+        );
+        assert_eq!(
+            git(&worktree.0, &["diff", "--name-only", &head]).unwrap(),
+            "a.txt\nnew.txt"
+        );
+        // The coder's branch, index and files are as they were.
+        assert_eq!(git(dir, &["rev-parse", "HEAD"]).unwrap(), head);
+        assert_eq!(git(dir, &["branch", "--show-current"]).unwrap(), "feature");
+        assert_eq!(git(dir, &["status", "--porcelain"]).unwrap(), status);
+
+        drop(snap);
+        assert!(!worktree.0.exists());
+        assert_eq!(git(dir, &["worktree", "list"]).unwrap().lines().count(), 1);
     }
 
     #[test]

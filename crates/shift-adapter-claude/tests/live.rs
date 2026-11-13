@@ -2,8 +2,22 @@
 //! only runs with `SHIFT_LIVE=1` (ADR 0003).
 
 use shift_adapter_claude::{ClaudeAdapter, TRANSCRIPT};
-use shift_core::delegate::StubReviewer;
-use shift_core::{Adapter, Event, builtin_agent};
+use shift_core::delegate::delegate_task_spec;
+use shift_core::{Adapter, Event, ToolServer, ToolSpec, builtin_agent};
+
+/// Stands in for the reviewer: blocks briefly, then answers.
+struct SlowTool;
+
+impl ToolServer for SlowTool {
+    fn tools(&self) -> Vec<ToolSpec> {
+        vec![delegate_task_spec()]
+    }
+
+    fn call(&self, _: &str, _: serde_json::Value) -> Result<String, String> {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        Ok(r#"{"verdict":"approve"}"#.into())
+    }
+}
 
 #[test]
 fn coder_runs_a_shell_command_through_the_gate() {
@@ -15,9 +29,7 @@ fn coder_runs_a_shell_command_through_the_gate() {
     std::fs::create_dir_all(&repo).unwrap();
 
     let coder = builtin_agent("coder").unwrap();
-    let tools = std::sync::Arc::new(StubReviewer {
-        wait: std::time::Duration::from_secs(1),
-    });
+    let tools = std::sync::Arc::new(SlowTool);
     let (session, events) = ClaudeAdapter.start(&coder, &repo, &dir, tools).unwrap();
     session
         .send(

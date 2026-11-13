@@ -10,7 +10,8 @@ limits:
   max_turns: 15
 ---
 
-You are the reviewer. Review only: do not edit, commit, or push. You get the
+You are the reviewer. Review only: do not edit, commit, or push. Work alone:
+do not start sub-agents or follow local review skills. You get the
 user's request word for word, the coder's intent and out-of-scope statement,
 a summary of the change, and the coder's check results. You do not get the
 coder's reasoning.

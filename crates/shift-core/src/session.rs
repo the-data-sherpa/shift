@@ -28,9 +28,8 @@ pub trait Adapter {
     ) -> io::Result<(Box<dyn Session>, Receiver<Event>)>;
 }
 
-/// Create `<state>/shift/sessions/<id>/` for a new session and return the id
-/// and the directory. `<state>` is `$XDG_STATE_HOME` or `~/.local/state`.
-pub fn new_session_dir() -> io::Result<(String, PathBuf)> {
+/// shift's state directory: `$XDG_STATE_HOME/shift` or `~/.local/state/shift`.
+pub fn state_dir() -> io::Result<PathBuf> {
     let state = match std::env::var_os("XDG_STATE_HOME").filter(|v| !v.is_empty()) {
         Some(dir) => PathBuf::from(dir),
         None => {
@@ -39,8 +38,14 @@ pub fn new_session_dir() -> io::Result<(String, PathBuf)> {
             PathBuf::from(home).join(".local/state")
         }
     };
+    Ok(state.join("shift"))
+}
+
+/// Create `<state>/sessions/<id>/` for a new session and return the id and
+/// the directory.
+pub fn new_session_dir() -> io::Result<(String, PathBuf)> {
     let id = uuid::Uuid::new_v4().to_string();
-    let dir = state.join("shift/sessions").join(&id);
+    let dir = state_dir()?.join("sessions").join(&id);
     std::fs::create_dir_all(&dir)?;
     Ok((id, dir))
 }

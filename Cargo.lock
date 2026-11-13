@@ -6140,6 +6140,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "shift-adapter-codex"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "serde_json",
+ "shift-core",
+]
+
+[[package]]
 name = "shift-app"
 version = "0.1.0"
 dependencies = [
@@ -6148,6 +6157,7 @@ dependencies = [
  "gpui-pre",
  "serde_json",
  "shift-adapter-claude",
+ "shift-adapter-codex",
  "shift-core",
 ]
 
