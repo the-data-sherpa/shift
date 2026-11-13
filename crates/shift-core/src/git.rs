@@ -72,17 +72,26 @@ pub fn snapshot(repo: &Path, worktree: &Path) -> io::Result<Snapshot> {
         )
     })();
     let _ = std::fs::remove_file(&index);
-    let commit = commit?;
+    // From here on, dropping the snapshot removes the worktree: git keeps a
+    // worktree it has created even when `worktree add` then fails.
+    let snapshot = Snapshot {
+        repo: repo.to_owned(),
+        commit: commit?,
+        worktree: worktree.to_owned(),
+    };
     let path = worktree.to_string_lossy();
     git(
         repo,
-        &["worktree", "add", "--quiet", "--detach", &path, &commit],
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            &path,
+            &snapshot.commit,
+        ],
     )?;
-    Ok(Snapshot {
-        repo: repo.to_owned(),
-        commit,
-        worktree: worktree.to_owned(),
-    })
+    Ok(snapshot)
 }
 
 impl Drop for Snapshot {
@@ -257,6 +266,26 @@ pub(crate) mod tests {
         drop(snap);
         assert!(!worktree.0.exists());
         assert_eq!(git(dir, &["worktree", "list"]).unwrap().lines().count(), 1);
+    }
+
+    #[test]
+    fn a_failed_checkout_leaves_no_worktree_behind() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = repo("snapshot-hook");
+        let hook = temp.0.join(".git/hooks/post-checkout");
+        std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let worktree = Temp::new("snapshot-hook-wt");
+        std::fs::remove_dir(&worktree.0).unwrap();
+
+        assert!(snapshot(&temp.0, &worktree.0).is_err());
+
+        assert!(!worktree.0.exists());
+        assert_eq!(
+            git(&temp.0, &["worktree", "list"]).unwrap().lines().count(),
+            1
+        );
     }
 
     #[test]
