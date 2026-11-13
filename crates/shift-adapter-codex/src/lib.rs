@@ -6,14 +6,15 @@ mod translate;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{self, Receiver};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use async_channel::Sender;
 use serde_json::{Value, json};
 use shift_core::review::{Reviewer, review_schema};
-use shift_core::{AgentDef, Event, Harness};
+use shift_core::{AgentDef, Cancel, Event, Harness};
 
 pub use translate::translate;
 
@@ -38,8 +39,16 @@ pub fn latest_model(family: &str, ids: &[String]) -> Option<String> {
         .map(|(_, id)| id.clone())
 }
 
+/// The wall-clock limit on one review. It also stands in for `max_turns`.
+pub const REVIEW_LIMIT: Duration = Duration::from_secs(15 * 60);
+
 /// Runs the reviewer agent on Codex.
 pub struct CodexReviewer {
+    /// The program to launch; `codex` unless a test swaps it.
+    pub program: PathBuf,
+    /// How long one review may run; [`REVIEW_LIMIT`] unless a test swaps it.
+    pub limit: Duration,
+    cancel: Cancel,
     agent: AgentDef,
     /// The reviewer's own persistent `CARGO_TARGET_DIR`.
     target_dir: PathBuf,
@@ -56,10 +65,14 @@ impl CodexReviewer {
         target_dir: PathBuf,
         transcript_dir: &Path,
         events: Sender<Event>,
+        cancel: Cancel,
     ) -> std::io::Result<Self> {
         std::fs::create_dir_all(&target_dir)?;
         let transcript = File::create(transcript_dir.join(TRANSCRIPT))?;
         Ok(Self {
+            program: Harness::Codex.binary().into(),
+            limit: REVIEW_LIMIT,
+            cancel,
             agent,
             target_dir,
             transcript: Arc::new(Mutex::new(transcript)),
@@ -75,7 +88,11 @@ impl Reviewer for CodexReviewer {
         // Later rounds are new turns on the same thread. A session that
         // failed is not reused: the next round starts a fresh one.
         let mut codex = match session.take() {
-            Some(codex) => codex,
+            Some(mut codex) => {
+                // The limit is per review, not per session.
+                codex.start_clock(self.limit);
+                codex
+            }
             None => self.start(worktree)?,
         };
         let reply = codex.turn(worktree, brief, &self.target_dir)?;
@@ -88,6 +105,7 @@ impl CodexReviewer {
     /// Start `codex app-server` and the reviewer's thread on the latest Sol.
     fn start(&self, worktree: &Path) -> Result<Connection, String> {
         let mut codex = Connection::open(self)?;
+        codex.start_clock(self.limit);
         let family = self
             .agent
             .model
@@ -136,7 +154,9 @@ impl CodexReviewer {
 /// One `codex app-server` process.
 struct Connection {
     child: Child,
-    stdin: ChildStdin,
+    /// Lines for Codex's stdin. A thread writes them, so a Codex that
+    /// stops reading cannot block the review past its limit or a cancel.
+    outgoing: mpsc::Sender<String>,
     /// Every line Codex sends.
     incoming: Receiver<String>,
     transcript: Arc<Mutex<File>>,
@@ -145,19 +165,36 @@ struct Connection {
     /// its own; those are not the review.
     thread: Option<String>,
     next_id: u64,
+    cancel: Cancel,
+    /// The running review's limit and when it runs out.
+    clock: Option<(Duration, Instant)>,
 }
 
 impl Connection {
     fn open(reviewer: &CodexReviewer) -> Result<Self, String> {
-        let mut child = Command::new(Harness::Codex.binary())
+        let mut child = Command::new(&reviewer.program)
             .arg("app-server")
             .env("CARGO_TARGET_DIR", &reviewer.target_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|e| format!("could not start `codex app-server`: {e}"))?;
-        let stdin = child.stdin.take().expect("piped stdin");
+            .map_err(|e| {
+                let program = reviewer.program.display();
+                format!("could not start `{program} app-server`: {e}")
+            })?;
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        let (outgoing, lines) = mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            for line in lines {
+                if writeln!(stdin, "{line}")
+                    .and_then(|()| stdin.flush())
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
         let stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
         let (sender, incoming) = mpsc::channel();
         let transcript = reviewer.transcript.clone();
@@ -172,30 +209,72 @@ impl Connection {
         });
         Ok(Self {
             child,
-            stdin,
+            outgoing,
             incoming,
             transcript: reviewer.transcript.clone(),
             events: reviewer.events.clone(),
             thread: None,
             next_id: 0,
+            cancel: reviewer.cancel.clone(),
+            clock: None,
         })
+    }
+
+    /// Start one review's wall clock.
+    fn start_clock(&mut self, limit: Duration) {
+        self.clock = Some((limit, Instant::now() + limit));
+    }
+
+    /// The next line from Codex, unless the user cancels, the review runs
+    /// out of time, or Codex exits first.
+    fn next_line(&mut self) -> Result<String, String> {
+        loop {
+            if self.cancel.is_cancelled() {
+                return Err("cancelled by user".into());
+            }
+            if let Some((limit, deadline)) = self.clock
+                && Instant::now() >= deadline
+            {
+                let limit = match limit.as_secs() {
+                    secs if secs >= 60 => format!("{}-minute", secs / 60),
+                    secs => format!("{secs}-second"),
+                };
+                return Err(format!("the review exceeded its {limit} limit"));
+            }
+            match self.incoming.recv_timeout(Duration::from_millis(100)) {
+                Ok(line) => return Ok(line),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return Err(self.closed()),
+            }
+        }
+    }
+
+    /// Why Codex's output ended early. An exiting process takes a moment to
+    /// be reapable; one that only closed its output is not waited for.
+    fn closed(&mut self) -> String {
+        for _ in 0..10 {
+            if let Ok(Some(status)) = self.child.try_wait() {
+                return format!("Codex exited before the review finished ({status})");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        "Codex closed its output before the review finished".into()
     }
 
     fn send(&mut self, message: &Value) -> Result<(), String> {
         let _ = writeln!(self.transcript.lock().unwrap(), "{message}");
-        writeln!(self.stdin, "{message}")
-            .and_then(|()| self.stdin.flush())
-            .map_err(|e| format!("could not write to Codex: {e}"))
+        // The writer only stops when Codex is gone, as when a session
+        // kept between rounds has died; say that.
+        self.outgoing
+            .send(message.to_string())
+            .map_err(|_| self.closed())
     }
 
     /// The next message about the reviewer's thread, or about no thread.
     /// Its events go to the reviewer pane.
     fn next(&mut self) -> Result<Value, String> {
         loop {
-            let line = self
-                .incoming
-                .recv()
-                .map_err(|_| "Codex exited before the review finished".to_string())?;
+            let line = self.next_line()?;
             let Ok(message) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };

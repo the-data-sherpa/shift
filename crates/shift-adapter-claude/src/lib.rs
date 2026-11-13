@@ -150,7 +150,7 @@ impl Adapter for ClaudeAdapter {
                 for call in output.calls {
                     let (tools, writer) = (tools.clone(), writer.clone());
                     std::thread::spawn(move || {
-                        let result = tools.call(&call.name, call.arguments.clone());
+                        let result = tools.call(&call.name, call.arguments.clone(), &call.call_id);
                         // Claude may have exited while the tool ran.
                         let _ = write_frame(&writer, &tool_reply(&call, result));
                     });

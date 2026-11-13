@@ -133,7 +133,7 @@ impl ToolServer for Delegate {
         vec![delegate_task_spec()]
     }
 
-    fn call(&self, name: &str, arguments: Value) -> Result<String, String> {
+    fn call(&self, name: &str, arguments: Value, _: &str) -> Result<String, String> {
         if name != DELEGATE_TASK {
             return Err(format!("shift has no tool `{name}`"));
         }
@@ -296,9 +296,13 @@ mod tests {
             );
 
             // Without a user request there is nothing to review against.
-            assert!(delegate.call(DELEGATE_TASK, arguments.clone()).is_err());
+            assert!(
+                delegate
+                    .call(DELEGATE_TASK, arguments.clone(), "t")
+                    .is_err()
+            );
             *request.lock().unwrap() = Some("USER REQUEST".into());
-            let result = delegate.call(DELEGATE_TASK, arguments.clone());
+            let result = delegate.call(DELEGATE_TASK, arguments.clone(), "t");
 
             let seen = seen.lock().unwrap();
             assert_eq!(seen.len(), 1);
@@ -376,7 +380,7 @@ mod tests {
                 .map(|(id, answer)| json!({"id": id, "answer": answer, "note": format!("{id} {answer} note")}))
                 .collect();
         }
-        let result = delegate.call(DELEGATE_TASK, arguments)?;
+        let result = delegate.call(DELEGATE_TASK, arguments, "t")?;
         Ok(serde_json::from_str(&result).unwrap())
     }
 

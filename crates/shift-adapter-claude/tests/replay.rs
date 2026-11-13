@@ -139,7 +139,7 @@ fn shift_tools_are_served_over_the_control_channel() {
             "request": {"subtype": "can_use_tool", "tool_name": "mcp__shift__delegate_task", "input": arguments},
         })
         .to_string(),
-        mcp("e", json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "delegate_task", "arguments": arguments}})),
+        mcp("e", json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "delegate_task", "arguments": arguments, "_meta": {"claudecode/toolUseId": "toolu_1"}}})),
     ]
     .join("\n");
 
@@ -184,6 +184,8 @@ fn shift_tools_are_served_over_the_control_channel() {
     // The call itself is not answered inline: it blocks, so it runs elsewhere.
     assert_eq!(replies.len(), 4);
     assert_eq!(calls.len(), 1);
+    // The call carries Claude's tool use id, the one the pane shows it under.
+    assert_eq!(calls[0].call_id, "toolu_1");
     assert_eq!(
         (calls[0].name.as_str(), &calls[0].arguments),
         ("delegate_task", &arguments)

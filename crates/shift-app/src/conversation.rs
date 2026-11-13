@@ -6,7 +6,9 @@ use std::path::PathBuf;
 
 use async_channel::Receiver;
 use gpui_kit::component::{
-    ActiveTheme, StyledExt, Theme, h_flex,
+    ActiveTheme, StyledExt, Theme,
+    button::Button,
+    h_flex,
     input::{Input, InputEvent, InputState},
     v_flex,
 };
@@ -15,7 +17,7 @@ use serde_json::Value;
 use shift_core::delegate::LedgerEntry;
 use shift_core::history::{Entry, History, Stuck};
 use shift_core::review::RoundResult;
-use shift_core::{Event, Session};
+use shift_core::{Cancel, Event, Session};
 
 /// `delegate_task` as Claude names it.
 const DELEGATE_TASK: &str = "mcp__shift__delegate_task";
@@ -52,6 +54,8 @@ pub struct Conversation {
     input: Entity<InputState>,
     scroll: ScrollHandle,
     reviewer_scroll: ScrollHandle,
+    /// Stops the running review.
+    cancel: Cancel,
 }
 
 impl Conversation {
@@ -62,6 +66,7 @@ impl Conversation {
         branch: Option<String>,
         started: std::io::Result<(Box<dyn Session>, Receiver<Event>)>,
         reviewer: Receiver<Event>,
+        cancel: Cancel,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -128,6 +133,33 @@ impl Conversation {
             input,
             scroll: ScrollHandle::new(),
             reviewer_scroll: ScrollHandle::new(),
+            cancel,
+        }
+    }
+
+    /// The id of the coder's `delegate_task` call that has no result yet:
+    /// a review runs from that call until its result.
+    fn running_review(&self) -> Option<&str> {
+        self.items.iter().find_map(|item| match item {
+            Item::Tool {
+                id,
+                name,
+                result: None,
+                ..
+            } if name == DELEGATE_TASK => Some(id.as_str()),
+            _ => None,
+        })
+    }
+
+    pub fn reviewing(&self) -> bool {
+        self.running_review().is_some()
+    }
+
+    /// The Cancel review button: stop the review this pane shows as
+    /// running. The coder gets a "cancelled by user" tool error.
+    pub fn cancel_review(&mut self) {
+        if let Some(call_id) = self.running_review() {
+            self.cancel.cancel(call_id);
         }
     }
 
@@ -177,7 +209,7 @@ impl Conversation {
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.input.read(cx).value().trim().to_owned();
         let Some(session) = &self.session else { return };
-        if text.is_empty() {
+        if text.is_empty() || self.reviewing() {
             return;
         }
         match session.send(&text) {
@@ -402,9 +434,29 @@ impl Render for Conversation {
                     .children(render_items(&self.items, theme)),
             )
             .child(
-                Input::new(&self.input)
-                    .id("message")
-                    .disabled(self.session.is_none()),
+                h_flex()
+                    .gap_2()
+                    .child(
+                        div().flex_1().child(
+                            Input::new(&self.input)
+                                .id("message")
+                                .disabled(self.session.is_none() || self.reviewing()),
+                        ),
+                    )
+                    .children(self.reviewing().then(|| {
+                        let button = div().child(
+                            Button::new("cancel-review")
+                                .label("Cancel review")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.cancel_review();
+                                    cx.notify();
+                                })),
+                        );
+                        // Lets the UI test find the button and click it.
+                        #[cfg(test)]
+                        let button = button.debug_selector(|| "cancel-review".into());
+                        button
+                    })),
             );
 
         // The reviewer pane appears with the first review and has no input.
@@ -462,7 +514,7 @@ mod tests {
     use serde_json::json;
     use shift_core::delegate::Answer;
     use shift_core::history::Entry;
-    use shift_core::{Event, Session};
+    use shift_core::{Cancel, Event, Session};
 
     // No `use super::*`: GPUI's glob would shadow Rust's `#[test]`.
     use super::{Conversation, Item};
@@ -487,7 +539,15 @@ mod tests {
             gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
                 cx.new(|cx| {
                     let started = Ok((session, receiver));
-                    Conversation::new("/repo".into(), None, started, reviewer, window, cx)
+                    Conversation::new(
+                        "/repo".into(),
+                        None,
+                        started,
+                        reviewer,
+                        Cancel::default(),
+                        window,
+                        cx,
+                    )
                 })
             })
             .unwrap()
@@ -570,7 +630,15 @@ mod tests {
             gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
                 cx.new(|cx| {
                     let started = Ok((session, receiver));
-                    Conversation::new("/repo".into(), None, started, reviewer, window, cx)
+                    Conversation::new(
+                        "/repo".into(),
+                        None,
+                        started,
+                        reviewer,
+                        Cancel::default(),
+                        window,
+                        cx,
+                    )
                 })
             })
             .unwrap()
@@ -647,5 +715,71 @@ mod tests {
             assert_eq!(shown.disputes[0].reviewer, "wrong");
             assert_eq!(shown.disputes[0].coder, ["disagree: see the test"]);
         });
+    }
+
+    #[gpui::test]
+    fn a_running_review_disables_the_input_and_can_be_cancelled(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let (events, receiver) = async_channel::unbounded();
+        let (_reviewer_events, reviewer) = async_channel::unbounded();
+        let session: Box<dyn Session> = Box::new(FakeSession(sent.clone()));
+        let cancel = Cancel::default();
+        let button = cancel.clone();
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| {
+                    let started = Ok((session, receiver));
+                    Conversation::new("/repo".into(), None, started, reviewer, button, window, cx)
+                })
+            })
+            .unwrap()
+        });
+        let cx = &mut VisualTestContext::from_window(window, cx);
+        let review = |id: &str| Event::ToolCall {
+            id: id.into(),
+            name: "mcp__shift__delegate_task".into(),
+            input: json!({"intent": "fix the bug"}),
+        };
+        let cancelled = |id: &str| Event::ToolResult {
+            id: id.into(),
+            output: "cancelled by user".into(),
+            is_error: true,
+        };
+
+        // No review is running: there is nothing to cancel.
+        cancel.begin("d0");
+        view.update(cx, |view, _| view.cancel_review());
+        assert!(!cancel.is_cancelled());
+
+        events.send_blocking(review("d1")).unwrap();
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |view, _| view.reviewing()));
+        cancel.begin("d1");
+
+        // The input takes nothing while the review runs.
+        cx.simulate_input("hello");
+        cx.simulate_keystrokes("enter");
+        assert!(sent.lock().unwrap().is_empty());
+
+        // Click the Cancel review button.
+        let button = cx.debug_bounds("cancel-review").expect("the button shows");
+        cx.simulate_click(button.center(), gpui::Modifiers::none());
+        assert!(cancel.is_cancelled());
+
+        // The pane lags: shift is already running the next review when the
+        // button, still showing for d1, is pressed. Only d1 is cancelled.
+        cancel.begin("d2");
+        view.update(cx, |view, _| view.cancel_review());
+        assert!(!cancel.is_cancelled());
+
+        // The cancelled review comes back as a tool error; the input works again.
+        events.send_blocking(cancelled("d1")).unwrap();
+        cx.run_until_parked();
+        assert!(!view.read_with(cx, |view, _| view.reviewing()));
+        assert!(cx.debug_bounds("cancel-review").is_none());
+        cx.simulate_input("try again");
+        cx.simulate_keystrokes("enter");
+        assert_eq!(*sent.lock().unwrap(), ["try again"]);
     }
 }
