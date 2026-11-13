@@ -88,6 +88,23 @@ pub fn load_agents_dir(dir: &Path) -> Result<Vec<AgentDef>, LoadError> {
     Ok(agents)
 }
 
+/// The agent definitions compiled into the binary, so an installed copy of
+/// shift works from any directory.
+const BUILTIN: &[(&str, &str)] = &[
+    ("coder", include_str!("../../../agents/coder.md")),
+    ("reviewer", include_str!("../../../agents/reviewer.md")),
+];
+
+/// A built-in agent definition by name.
+pub fn builtin_agent(name: &str) -> Result<AgentDef, LoadError> {
+    let path = PathBuf::from(format!("agents/{name}.md"));
+    let (_, text) = BUILTIN
+        .iter()
+        .find(|(n, _)| *n == name)
+        .ok_or_else(|| LoadError::NoFrontmatter { path: path.clone() })?;
+    AgentDef::parse(&path, text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,6 +117,17 @@ mod tests {
         assert_eq!(def.skills, ["debug"]);
         assert_eq!(def.limits.max_turns, Some(30));
         assert_eq!(def.prompt, "You are the coder.");
+    }
+
+    #[test]
+    fn builtin_coder_has_its_tools_and_no_fixed_model() {
+        let coder = builtin_agent("coder").unwrap();
+        assert_eq!(coder.harness, Harness::ClaudeCode);
+        assert_eq!(coder.tools, ["fs.read", "fs.write", "shell.exec"]);
+        assert_eq!(coder.model, None);
+        assert!(coder.prompt.starts_with("You are the coder."));
+        assert!(builtin_agent("reviewer").is_ok());
+        assert!(builtin_agent("nobody").is_err());
     }
 
     #[test]

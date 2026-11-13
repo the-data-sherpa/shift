@@ -3,7 +3,7 @@ name: coder
 role: coder
 description: Makes the smallest complete change that does a scoped task.
 harness: claude-code  # which harness runs this agent
-model: TBD  # your usual Claude coding model
+# No `model`: the coder uses your usual Claude coding model.
 skills: [debug]
 tools: [fs.read, fs.write, shell.exec]
 limits:
