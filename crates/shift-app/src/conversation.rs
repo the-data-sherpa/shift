@@ -149,6 +149,11 @@ impl Conversation {
                     // A failed review changed nothing.
                     return None;
                 }
+                // Once Stuck, shift repeats the same result and runs no more
+                // rounds, so the history is final.
+                if self.items.iter().any(|item| matches!(item, Item::Stuck(_))) {
+                    return serde_json::from_str(output).ok();
+                }
                 let ledger: Vec<LedgerEntry> =
                     serde_json::from_value(input["ledger"].clone()).unwrap_or_default();
                 // shift already accepted this ledger, so it fits the history.
@@ -603,8 +608,11 @@ mod tests {
             // A failed review changes nothing.
             call("t2", disagree.clone()),
             result("t2", json!("the review exceeded its limit"), true),
-            call("t3", disagree),
-            result("t3", stuck, false),
+            call("t3", disagree.clone()),
+            result("t3", stuck.clone(), false),
+            // Stuck stays Stuck: a further call adds no round to the history.
+            call("t4", disagree),
+            result("t4", stuck, false),
         ] {
             events.send_blocking(event).unwrap();
         }
