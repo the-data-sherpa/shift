@@ -111,7 +111,7 @@ impl Delegate {
         history.review(&review);
         state.history = history;
         state.last_snapshot = Some(snapshot.commit.clone());
-        if let Some(stuck) = state.history.disputed() {
+        if let Some(stuck) = state.history.disputed(&review) {
             state.stuck = Some(stuck.clone());
             return Ok(to_json(&stuck));
         }
@@ -169,16 +169,23 @@ fn later_round(history: &History, previous_snapshot: &str) -> String {
         "\n\n## Round {}\n\n\
          This is a later round of the same review. The last round reviewed commit \
          {previous_snapshot}: read what changed since with `git diff {previous_snapshot}`.\n\n\
-         The coder's answer to each open finding:\n",
+         The open findings, each with the coder's answer:\n",
         history.rounds + 1
     );
-    for finding in history.findings.iter().filter(|f| f.open) {
-        if let Some(Entry::Answered { answer, note }) = finding.log.last() {
-            text.push_str(&format!(
-                "\n- {}: {}: {note}",
-                finding.finding.id,
-                answer.label()
-            ));
+    for open in history.findings.iter().filter(|f| f.open) {
+        let finding = &open.finding;
+        let line = finding
+            .line
+            .map(|line| format!(":{line}"))
+            .unwrap_or_default();
+        // The claim is restated so the round stands on its own, even if the
+        // reviewer session had to be restarted.
+        text.push_str(&format!(
+            "\n- {} ({:?}, {}{line}): {}",
+            finding.id, finding.severity, finding.file, finding.claim
+        ));
+        if let Some(Entry::Answered { answer, note }) = open.log.last() {
+            text.push_str(&format!("\n  Coder: {}: {note}", answer.label()));
         }
     }
     text.push_str(
@@ -405,8 +412,10 @@ mod tests {
         for part in [
             "## Round 2",
             "USER REQUEST",
-            "- S1: fixed: S1 fixed note",
-            "- S2: disagree: S2 disagree note",
+            "- S1 (Should, a.txt:1): S1 is wrong",
+            "Coder: fixed: S1 fixed note",
+            "- S2 (Should, a.txt:1): S2 is wrong",
+            "Coder: disagree: S2 disagree note",
             "still open under its original id",
         ] {
             assert!(
@@ -416,7 +425,7 @@ mod tests {
             );
         }
         assert!(
-            briefs[2].contains("## Round 3") && briefs[2].contains("- S2: fixed: S2 fixed note")
+            briefs[2].contains("## Round 3") && briefs[2].contains("Coder: fixed: S2 fixed note")
         );
         assert!(
             !briefs[2].contains("S1 fixed note"),
@@ -433,7 +442,7 @@ mod tests {
             fourth["disputes"][0]["coder"],
             json!(["declined: S3 declined note"])
         );
-        assert!(fourth.get("verdict").is_none());
+        assert!(fourth.get("verdict").is_none() && fourth.get("review").is_none());
         // Stuck stays Stuck.
         assert_eq!(call(&delegate, &[]).unwrap(), fourth);
     }
@@ -458,6 +467,8 @@ mod tests {
         );
         assert_eq!(third["disputes"][0]["coder"].as_array().unwrap().len(), 2);
         assert!(third.get("verdict").is_none());
+        // The round that ended in Stuck comes with it.
+        assert_eq!(third["review"]["findings"][0]["id"], "S1");
     }
 
     #[test]

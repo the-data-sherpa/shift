@@ -41,7 +41,11 @@ impl History {
     /// Store the coder's ledger: its answer to each open finding. Every open
     /// finding must be answered, and only open findings can be.
     pub fn answer(&mut self, ledger: &[LedgerEntry]) -> Result<(), String> {
-        for entry in ledger {
+        for (i, entry) in ledger.iter().enumerate() {
+            // One answer per finding: a repeat would count as a second reply.
+            if ledger[..i].iter().any(|earlier| earlier.id == entry.id) {
+                return Err(format!("the ledger answers `{}` more than once", entry.id));
+            }
             let finding = self
                 .findings
                 .iter_mut()
@@ -129,14 +133,17 @@ impl History {
 
     /// Why the review is Stuck right after a round, if it is: a finding is
     /// still open after the coder disagreed with it twice.
-    pub fn disputed(&self) -> Option<Stuck> {
+    /// `review` is the round that just completed.
+    pub fn disputed(&self, review: &Review) -> Option<Stuck> {
         let disputes: Vec<Dispute> = self
             .blocking()
             .filter(|f| f.disagreements() >= MAX_DISPUTES)
             .map(FindingHistory::dispute)
             .collect();
-        (!disputes.is_empty())
-            .then(|| Stuck::new("A finding is still disputed after two replies.", disputes))
+        (!disputes.is_empty()).then(|| Stuck {
+            review: Some(review.clone()),
+            ..Stuck::new("A finding is still disputed after two replies.", disputes)
+        })
     }
 
     /// Stuck because the round budget is spent, with every blocking finding.
@@ -192,6 +199,10 @@ pub struct Stuck {
     pub disputes: Vec<Dispute>,
     /// What the coder must do now.
     pub next: String,
+    /// The round that ended in Stuck, when one did: a spent budget completes
+    /// no round.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<Review>,
 }
 
 impl Stuck {
@@ -202,6 +213,7 @@ impl Stuck {
             next: "Stuck is not approval. Do not call delegate_task again. Stop and report \
                    both sides to the user."
                 .into(),
+            review: None,
         }
     }
 }
@@ -314,7 +326,7 @@ mod tests {
             }]
         );
         assert!(!history.ended());
-        assert_eq!(history.disputed(), None);
+        assert_eq!(history.disputed(&review(Vec::new())), None);
     }
 
     #[test]
@@ -346,6 +358,14 @@ mod tests {
             .unwrap_err();
         assert!(unknown.contains("`S9`"), "{unknown}");
         assert!(history.clone().answer(&[]).is_err());
+        // Answering S1 twice in one ledger is not two replies.
+        let twice = [
+            entry("S1", Answer::Disagree),
+            entry("S1", Answer::Disagree),
+            entry("S2", Answer::Declined),
+        ];
+        let repeated = history.clone().answer(&twice).unwrap_err();
+        assert!(repeated.contains("more than once"), "{repeated}");
         assert!(
             history
                 .answer(&[entry("S1", Answer::Fixed), entry("S2", Answer::Declined)])
@@ -359,11 +379,13 @@ mod tests {
         history.review(&review(vec![finding("S1", Severity::Should)]));
         history.answer(&[entry("S1", Answer::Disagree)]).unwrap();
         history.review(&review(vec![finding("S1", Severity::Should)]));
-        assert_eq!(history.disputed(), None);
+        assert_eq!(history.disputed(&review(Vec::new())), None);
         history.answer(&[entry("S1", Answer::Disagree)]).unwrap();
-        history.review(&review(vec![finding("S1", Severity::Should)]));
+        let third = review(vec![finding("S1", Severity::Should)]);
+        history.review(&third);
 
-        let stuck = history.disputed().unwrap();
+        let stuck = history.disputed(&third).unwrap();
+        assert_eq!(stuck.review, Some(third));
         assert!(stuck.stuck.contains("disputed after two replies"));
         assert_eq!(stuck.disputes.len(), 1);
         assert_eq!(stuck.disputes[0].reviewer, "S1 claim");
@@ -383,7 +405,7 @@ mod tests {
         history.answer(&[entry("S1", Answer::Disagree)]).unwrap();
         // The reviewer accepts the coder's evidence and leaves S1 out.
         history.review(&review(Vec::new()));
-        assert_eq!(history.disputed(), None);
+        assert_eq!(history.disputed(&review(Vec::new())), None);
         assert!(history.ended());
     }
 }

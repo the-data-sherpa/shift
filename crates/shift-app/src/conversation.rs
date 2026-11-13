@@ -154,6 +154,10 @@ impl Conversation {
                 // shift already accepted this ledger, so it fits the history.
                 let _ = self.history.answer(&ledger);
                 if let Ok(stuck) = serde_json::from_str::<Stuck>(output) {
+                    // A dispute ends in Stuck on a completed round.
+                    if let Some(review) = &stuck.review {
+                        self.history.review(review);
+                    }
                     return Some(stuck);
                 }
                 if let Ok(round) = serde_json::from_str::<RoundResult>(output) {
@@ -587,6 +591,10 @@ mod tests {
             "stuck": "A finding is still disputed after two replies.",
             "disputes": [{"id": "S1", "file": "a.rs", "line": 3, "reviewer": "wrong", "coder": ["disagree: see the test"]}],
             "next": "Stop.",
+            "review": {
+                "verdict": "changes", "summary": "s", "follow_ups": [], "commands_run": [],
+                "findings": [{"id": "S1", "severity": "should", "file": "a.rs", "line": 3, "claim": "still wrong", "fix": "f"}],
+            },
         });
 
         for event in [
@@ -616,6 +624,11 @@ mod tests {
                     Entry::Answered {
                         answer: Answer::Disagree,
                         note: "see the test".into()
+                    },
+                    // The round that ended in Stuck is in the history too.
+                    Entry::StillOpen {
+                        round: 2,
+                        claim: "still wrong".into()
                     },
                 ]
             );
