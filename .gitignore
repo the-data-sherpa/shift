@@ -1,1 +1,123 @@
-/target
+# ---------------------------------------------------------------------------
+# shift .gitignore. This is a PUBLIC repository.
+# Cargo.lock is committed on purpose: shift ships a binary.
+# ---------------------------------------------------------------------------
+
+# --- Rust / Cargo build output ---
+/target/
+**/target/
+**/*.rs.bk
+*.pdb
+*.profraw
+*.profdata
+/perf.data*
+/flamegraph*.svg
+
+# --- Secrets and credentials (never commit) ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.der
+id_rsa*
+id_ed25519*
+*.keystore
+*.secret
+*.secrets
+secrets/
+credentials*.json
+auth.json
+.netrc
+.npmrc
+.pypirc
+
+# --- Local agent/harness state (sessions, transcripts, local config) ---
+# Project-shared harness config may be committed deliberately, but per-user
+# and session files must not be.
+.claude/settings.local.json
+.claude/*.local.*
+.claude/todos/
+.claude/projects/
+CLAUDE.local.md
+AGENTS.local.md
+.codex/
+.gemini/
+.antigravity/
+.agy/
+.pi/
+.omp/
+.opencode/
+.cursor/
+.aider*
+.lavish/
+# Agent scratch/output folders that tend to get created in the repo root
+/Claude outputs/
+/agent-output*/
+/snitchfindings/
+/scratch/
+/tmp/
+
+# --- shift runtime data ---
+# Raw recorded harness sessions may contain prompts, paths and account data.
+# Commit only redacted fixtures (see ADR 0003, recorded-session tests).
+/recordings/
+*.raw.jsonl
+*.raw.ndjson
+# Local runtime state, databases and logs
+/data/
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.log
+logs/
+# Local overrides of agent/flow definitions
+*.local.md
+*.local.toml
+*.local.yaml
+*.local.json
+
+# --- Tooling ---
+mise.local.toml
+.mise.local.toml
+.tool-versions.local
+.direnv/
+.envrc
+
+# --- Editors / IDEs ---
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.iml
+.zed/
+.fleet/
+*.swp
+*.swo
+*~
+\#*\#
+.\#*
+
+# --- OS cruft ---
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.directory
+.Trash-*
+.nfs*
+
+# --- Core dumps / crash artifacts ---
+/core
+/core.[0-9]*
+vgcore.*
