@@ -1,11 +1,39 @@
 # Context: shift vocabulary
 
-Use these terms consistently in code, docs, and conversation.
+shift orchestrates existing agent harnesses so narrow agents, each on the
+harness that suits its role, can work together. Use these terms consistently
+in code, docs, and conversation.
 
-**Harness**: The whole runtime. It owns input (voice and text), the meta
-thread, the bus, agent lifecycles, and enforcement of capabilities.
+## Runtime
 
-**Meta thread**: The conversation the user has with the harness. It
+**Orchestrator**: shift's own runtime. It owns input (voice and text), the
+meta thread, the bus, session lifecycles, and enforcement of capabilities.
+_Avoid_: harness (for shift itself), runtime
+
+**Harness**: An existing agent tool that shift launches and drives, such as
+Codex, Claude Code, Antigravity, Pi, Oh My Pi, or OpenCode. shift does not
+call model APIs directly (see ADR 0001).
+_Avoid_: backend harness, provider
+
+**Adapter**: shift's integration with one harness. It compiles an agent
+definition into that harness's launch config and drives the session. It also
+reports the harness's capabilities.
+
+**Session**: One agent's conversation inside one harness. It survives a
+restart of the harness process (for example, a resume).
+_Avoid_: instance, thread (Codex's `thread` is an adapter detail)
+
+**Policy gate**: The single check that answers every approval request from
+every harness. It allows or denies each action based on the agent definition
+(see ADR 0003).
+
+**shift MCP server**: The MCP endpoint injected into every session, scoped
+to that session. It exposes `delegate_task`, bus tools, and handoff tools. It
+is how agents reach the orchestrator.
+
+## Work
+
+**Meta thread**: The conversation the user has with the orchestrator. It
 classifies intent, picks a flow, starts it, and reports results back. It does
 no domain work itself.
 
@@ -18,11 +46,12 @@ in terms of roles. Each role is filled by an agent.
 
 **Agent**: A narrowly scoped worker. It has a model, a system prompt, an
 allowlist of skills and tools, and limits such as max turns. Each agent runs
-in its own isolated thread. This matches a Standard Agent Spec agent.
+in its own session. This matches a Standard Agent Spec agent.
 
 **Skill**: A reusable capability that an agent may call, such as `debug`,
 `code-read`, `deep-research`, or `grilling`. An agent's definition lists the
-skills it is allowed to use. The harness rejects calls to any other skill.
+skills it is allowed to use. The orchestrator rejects calls to any other
+skill.
 
 **Tool**: A low-level action, such as reading a file, writing a file, running
 a command, or searching the web. Skills are built on tools. Tool access is
@@ -32,30 +61,32 @@ where hard capability limits get enforced.
 typed, for example `finding`, `request`, `handoff`, `verdict`, and `artifact`.
 The meta thread and the UI subscribe to it.
 
-**Backend harness**: An existing agent harness that shift launches and
-drives, such as Codex, Claude Code, Antigravity, Pi, Oh My Pi, or OpenCode.
-shift does not call model APIs directly (see ADR 0001).
+**Delegation**: An agent asks the orchestrator to run a subtask in a new
+child session, possibly on a different harness. The child gets only the task
+and its role, not the parent's history. Its privileges can only be equal to
+the parent's or narrower.
 
-**Adapter**: shift's integration with one backend harness. It compiles an
-agent definition into that harness's launch config and drives the session.
-It also reports the harness's capabilities.
+**Review**: A reviewer's structured judgement of one change against the
+user's request: `approve` or `changes`, with findings and the commands it
+ran. `changes` means at least one blocker or should finding is open.
+_Avoid_: verdict, pass/fail (for code review)
 
-**Policy gate**: The single check in `shift-core` that every adapter sends
-its harness's approval requests to. It allows or denies each action based on
-the agent definition (see ADR 0003).
+**Finding**: One problem a review reports, with a stable id and a severity:
+`blocker` (the requested behavior fails, or a reachable safety violation),
+`should` (another reachable regression the change introduced), or `nit`.
 
-**Instance**: One running session of a backend harness, configured as one
-agent.
+**Follow-up**: A pre-existing defect a review notices but that the change did
+not introduce. It is out of scope for the change.
 
-**shift MCP server**: The MCP endpoint injected into every instance, with a
-token scoped to that session. It exposes `delegate_task`, bus tools, and
-handoff tools. It is how agents reach the bus.
+**Round**: One review of the current change. Later rounds look only at open
+findings and code changed since the last round.
 
-**Delegation**: An agent asks shift to run a subtask as a new child instance,
-possibly on a different backend harness. The child gets only the task and its
-role, not the parent's history. Its privileges can only be equal to the
-parent's or narrower.
+**Ledger**: The coder's answer to each finding across rounds: fixed,
+disagreed (with evidence), or declined.
+
+**Stuck**: The end state when a finding stays disputed after two replies or
+the round budget runs out. It goes to the user, never counts as approval.
 
 **Capability boundary**: The rule that an agent cannot act outside its role.
-The harness enforces it through tool and skill allowlists, not through prompt
-wording.
+The orchestrator enforces it through tool and skill allowlists, not through
+prompt wording.

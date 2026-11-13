@@ -14,14 +14,14 @@ context.
 ## Core ideas
 
 1. **Narrow agents.** Each agent does one job and cannot do anything else. A
-   coder can't make architecture decisions. A validator can't edit code. The
-   harness enforces this through tool and skill allowlists. Prompts alone
+   coder can't make architecture decisions. A reviewer can't edit code. The
+   orchestrator enforces this through tool and skill allowlists. Prompts alone
    aren't enough.
 2. **Flows, not free-for-alls.** The user's intent picks a flow. A flow is a
    named set of roles and the order they hand off in. Examples:
    - `research`: researcher, validator, counterpoint
    - `build`: product manager, architect
-   - `bugfix`: scout, coder, validator
+   - `bugfix`: scout, coder, reviewer
    - `document`: tech writer
    - `decide`: SRE, architect, counterpoint
 3. **Skills per agent.** Each agent declares the skills it may call. For
@@ -42,8 +42,8 @@ context.
 
 ## Current milestone
 
-**M1: Claude delegates validation to Codex.** See
-`docs/milestones/m1-claude-delegates-to-codex.md`.
+**M1: Claude delegates review to Codex.** See
+`docs/milestones/m1-claude-delegates-review-to-codex.md`.
 
 ## Build
 

@@ -59,6 +59,12 @@ launch** that role there instead of quietly weakening the boundary.
 
 ### 3. The MCP server is injected through a stdio bridge
 
+**Amended (M1):** Claude Code does not use the bridge. Its adapter answers
+shift tool calls in-process through Claude's stream-json control channel
+(`control_request` / `mcp_message`, an SDK MCP server), so no extra process
+is needed. The bridge below is for harnesses without such a channel (Codex,
+ACP). Build it when a non-Claude agent first needs shift tools.
+
 shift ships one subcommand: `shift mcp-bridge --session <token>`. Every
 harness launches it as a stdio MCP server, and it forwards calls to the shift
 core. The token is scoped to that one session and revoked when the session
