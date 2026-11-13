@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 shift-core.workspace = true
 shift-adapter-claude.workspace = true
+shift-adapter-codex.workspace = true
 gpui-kit.workspace = true
 async-channel.workspace = true
 serde_json.workspace = true

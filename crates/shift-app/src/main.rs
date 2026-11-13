@@ -6,36 +6,77 @@ mod conversation;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_channel::Receiver;
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::*;
 use shift_adapter_claude::ClaudeAdapter;
-use shift_core::delegate::StubReviewer;
+use shift_adapter_codex::CodexReviewer;
+use shift_core::review::{Delegate, UserRequest};
 use shift_core::{
-    Adapter, Event, Session, WorkBranch, builtin_agent, new_session_dir, start_work_branch,
+    Adapter, Event, Session, builtin_agent, new_session_dir, start_work_branch, state_dir,
 };
 
 use conversation::Conversation;
 
-/// Start the coder session in `cwd` on its own work branch, saving its
-/// transcript under a new session directory. A dirty working tree is refused.
-fn start_coder(cwd: &Path) -> io::Result<(WorkBranch, Box<dyn Session>, Receiver<Event>)> {
-    let coder = builtin_agent("coder").map_err(io::Error::other)?;
-    let (id, transcript_dir) = new_session_dir()?;
+/// What a started coder session hands the window.
+struct Started {
+    /// The session's `shift/<slug>` work branch.
+    branch: String,
+    coder: (Box<dyn Session>, Receiver<Event>),
+    /// The reviewer session's events, for the read-only reviewer pane.
+    reviewer: Receiver<Event>,
+}
+
+/// A coder session that remembers the user's original request, which every
+/// review is checked against.
+struct Recording {
+    session: Box<dyn Session>,
+    request: UserRequest,
+}
+
+impl Session for Recording {
+    fn send(&self, text: &str) -> io::Result<()> {
+        self.session.send(text)?;
+        self.request
+            .lock()
+            .unwrap()
+            .get_or_insert_with(|| text.to_owned());
+        Ok(())
+    }
+}
+
+/// Start the coder session in `cwd` on its own work branch, with
+/// `delegate_task` backed by the reviewer. Transcripts are saved under a new
+/// session directory. A dirty working tree is refused.
+fn start_coder(cwd: &Path) -> io::Result<Started> {
+    let agent = |name| builtin_agent(name).map_err(io::Error::other);
+    let (id, session_dir) = new_session_dir()?;
     let work = start_work_branch(cwd, &id[..8])?;
-    // Until the reviewer exists, `delegate_task` is a stub that waits
-    // `SHIFT_STUB_REVIEW_SECS` (default 5) and returns a canned review.
-    let wait = std::env::var("SHIFT_STUB_REVIEW_SECS")
-        .ok()
-        .and_then(|secs| secs.parse().ok())
-        .unwrap_or(5);
-    let tools = Arc::new(StubReviewer {
-        wait: Duration::from_secs(wait),
-    });
-    let (session, events) = ClaudeAdapter.start(&coder, cwd, &transcript_dir, tools)?;
-    Ok((work, session, events))
+
+    let (reviewer_events, reviewer) = async_channel::unbounded();
+    let request = UserRequest::default();
+    let delegate = Delegate::new(
+        cwd.to_owned(),
+        work.base,
+        session_dir.clone(),
+        request.clone(),
+        Box::new(CodexReviewer::new(
+            agent("reviewer")?,
+            // One build cache for every review, apart from the user's own.
+            state_dir()?.join("reviewer-target"),
+            &session_dir,
+            reviewer_events,
+        )?),
+    );
+
+    let (session, events) =
+        ClaudeAdapter.start(&agent("coder")?, cwd, &session_dir, Arc::new(delegate))?;
+    Ok(Started {
+        branch: work.branch,
+        coder: (Box::new(Recording { session, request }), events),
+        reviewer,
+    })
 }
 
 fn main() {
@@ -49,12 +90,11 @@ fn main() {
             std::process::exit(2);
         }
     };
-    // `work.base` is what reviews will diff against.
-    let (work, started) = match start_coder(&cwd) {
-        Ok((work, session, events)) => (Some(work), Ok((session, events))),
-        Err(e) => (None, Err(e)),
+    let (branch, started, reviewer) = match start_coder(&cwd) {
+        Ok(started) => (Some(started.branch), Ok(started.coder), started.reviewer),
+        // No session: the reviewer pane stays empty.
+        Err(e) => (None, Err(e), async_channel::unbounded().1),
     };
-    let branch = work.map(|work| work.branch);
 
     application().with_assets(assets::Assets).run(move |cx| {
         init(cx);
@@ -72,7 +112,7 @@ fn main() {
                 ..Default::default()
             },
             cx,
-            |window, cx| cx.new(|cx| Conversation::new(cwd, branch, started, window, cx)),
+            |window, cx| cx.new(|cx| Conversation::new(cwd, branch, started, reviewer, window, cx)),
         )
         .expect("failed to open window");
         cx.activate(true);

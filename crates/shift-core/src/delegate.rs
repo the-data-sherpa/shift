@@ -130,35 +130,6 @@ pub struct CommandRun {
     pub exit_code: i32,
 }
 
-/// The spike's stand-in for the reviewer: waits, then approves. It proves a
-/// blocking call survives as long as a real review takes.
-pub struct StubReviewer {
-    pub wait: std::time::Duration,
-}
-
-impl ToolServer for StubReviewer {
-    fn tools(&self) -> Vec<ToolSpec> {
-        vec![delegate_task_spec()]
-    }
-
-    fn call(&self, name: &str, arguments: Value) -> Result<String, String> {
-        if name != DELEGATE_TASK {
-            return Err(format!("shift has no tool `{name}`"));
-        }
-        let _: DelegateRequest = serde_json::from_value(arguments)
-            .map_err(|e| format!("invalid delegate_task arguments: {e}"))?;
-        std::thread::sleep(self.wait);
-        let review = Review {
-            verdict: ReviewVerdict::Approve,
-            summary: "Canned review from the shift stub; no reviewer ran.".into(),
-            findings: Vec::new(),
-            follow_ups: Vec::new(),
-            commands_run: Vec::new(),
-        };
-        Ok(serde_json::to_string(&review).expect("a review serializes"))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,19 +147,5 @@ mod tests {
             json!({"intent": "i", "out_of_scope": "o", "change_summary": "c", "checks": "k"});
         assert!(serde_json::from_value::<DelegateRequest>(no_ledger).is_ok());
         assert!(serde_json::from_value::<DelegateRequest>(json!({"intent": "i"})).is_err());
-    }
-
-    #[test]
-    fn stub_returns_a_review_and_rejects_bad_calls() {
-        let stub = StubReviewer {
-            wait: std::time::Duration::ZERO,
-        };
-        let args =
-            json!({"intent": "i", "out_of_scope": "o", "change_summary": "c", "checks": "k"});
-        let review: Review =
-            serde_json::from_str(&stub.call(DELEGATE_TASK, args.clone()).unwrap()).unwrap();
-        assert_eq!(review.verdict, ReviewVerdict::Approve);
-        assert!(stub.call("other", args).is_err());
-        assert!(stub.call(DELEGATE_TASK, json!({})).is_err());
     }
 }
