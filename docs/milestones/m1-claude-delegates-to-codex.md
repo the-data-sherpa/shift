@@ -92,7 +92,10 @@ Each of these is deferred, not rejected:
 
 ## Reuse from crewroom
 
-Copy and adapt; don't take in its workflow machinery.
+Copy and adapt; don't take in its workflow machinery. crewroom is MIT
+licensed (Copyright (c) 2026 Crewroom contributors). When you copy or
+closely port any of its code, add an entry under "Incorporated code" in
+`THIRD_PARTY_NOTICES.md` in the same commit.
 
 - `crates/crewroom-runtime/src/runner/claude.rs`, `codex.rs`, `jsonl.rs`
   (about 1,800 lines together).

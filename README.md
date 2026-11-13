@@ -4,9 +4,12 @@ A harness that runs a team of narrowly scoped agents. You talk to it by voice
 or text. A meta thread reads what you want, picks a **flow**, and brings in
 only the agents that flow needs.
 
-Inspiration: [Standard Agent Specification](https://standardagentspec.org/).
-Its core idea is composition over inheritance. Each agent covers one domain,
-gets only the capabilities it needs, and runs in its own isolated context.
+Inspired by the [Standard Agent Specification](https://standardagentspec.org/)
+and the orchestration design of [t3code](https://github.com/pingdotgg/t3code).
+See [acknowledgements](THIRD_PARTY_NOTICES.md). The Standard Agent
+Specification's core idea is composition over inheritance. Each agent covers
+one domain, gets only the capabilities it needs, and runs in its own isolated
+context.
 
 ## Core ideas
 
@@ -58,3 +61,10 @@ cargo run            # opens the GPUI window (run from repo root)
 - `agents/`: agent definitions (role, model, skills, tools, limits).
 - `flows/`: flow definitions (intent, roles, handoff order, exit conditions).
 - `docs/open-questions.md`: decisions not made yet.
+
+## License
+
+MIT. See [LICENSE](LICENSE). Third-party credits, dependency licenses and
+trademark notes are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+shift is an independent project. It is not affiliated with Anthropic, OpenAI,
+Google, T3 Tools, or Zed.

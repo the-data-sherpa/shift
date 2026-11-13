@@ -55,7 +55,10 @@ Reasons:
   and so on. Orchestration policy branches on those capabilities, not on
   provider names.
 
-Source: `pingdotgg/t3code`, `docs/orchestration-v2/orchestrator-mcp-server.md`.
+Source: `pingdotgg/t3code` (MIT License, Copyright (c) 2026 T3 Tools Inc.),
+`docs/orchestration-v2/orchestrator-mcp-server.md`. This section summarizes
+their design for reference. No t3code code or documentation text is copied
+into shift. See `THIRD_PARTY_NOTICES.md`.
 
 ## Consequences for shift
 
