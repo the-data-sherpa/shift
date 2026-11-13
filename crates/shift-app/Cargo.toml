@@ -1,0 +1,12 @@
+[package]
+name = "shift-app"
+edition.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "shift"
+path = "src/main.rs"
+
+[dependencies]
+shift-core.workspace = true
+gpui-kit.workspace = true
