@@ -228,6 +228,34 @@ exit 7"#;
 }
 
 #[test]
+fn a_codex_that_stops_reading_cannot_outlast_the_limit() {
+    // The fake starts the thread, then never reads again. The brief is far
+    // larger than a pipe holds, so writing it would block forever.
+    let script = r#"#!/bin/sh
+while read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/^{"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*) echo "{\"id\":$id,\"result\":{}}" ;;
+    *'"method":"model/list"'*) echo "{\"id\":$id,\"result\":{\"data\":[{\"id\":\"gpt-6.1-sol\"}]}}" ;;
+    *'"method":"thread/start"'*) echo "{\"id\":$id,\"result\":{\"thread\":{\"id\":\"t1\"},\"model\":\"gpt-6.1-sol\"}}"
+      exec sleep 60 ;;
+  esac
+done
+"#;
+    let fixture = fixture("deaf", script, Duration::from_secs(2));
+    let arguments = serde_json::json!({
+        "intent": "x".repeat(1 << 20), "out_of_scope": "o", "change_summary": "c", "checks": "k",
+    });
+    let started = Instant::now();
+    let error = fixture
+        .delegate
+        .call("delegate_task", arguments, CALL)
+        .unwrap_err();
+    assert_eq!(error, "the review exceeded its 2-second limit");
+    assert!(started.elapsed() < Duration::from_secs(10));
+}
+
+#[test]
 fn cancelling_stops_the_review_with_a_cancelled_by_user_error() {
     let script = FAKE.replace("TAIL", "");
     let fixture = fixture("cancel", &script, Duration::from_secs(60));

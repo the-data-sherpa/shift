@@ -6,7 +6,7 @@ mod translate;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -154,7 +154,9 @@ impl CodexReviewer {
 /// One `codex app-server` process.
 struct Connection {
     child: Child,
-    stdin: ChildStdin,
+    /// Lines for Codex's stdin. A thread writes them, so a Codex that
+    /// stops reading cannot block the review past its limit or a cancel.
+    outgoing: mpsc::Sender<String>,
     /// Every line Codex sends.
     incoming: Receiver<String>,
     transcript: Arc<Mutex<File>>,
@@ -181,7 +183,18 @@ impl Connection {
                 let program = reviewer.program.display();
                 format!("could not start `{program} app-server`: {e}")
             })?;
-        let stdin = child.stdin.take().expect("piped stdin");
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        let (outgoing, lines) = mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            for line in lines {
+                if writeln!(stdin, "{line}")
+                    .and_then(|()| stdin.flush())
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
         let stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
         let (sender, incoming) = mpsc::channel();
         let transcript = reviewer.transcript.clone();
@@ -196,7 +209,7 @@ impl Connection {
         });
         Ok(Self {
             child,
-            stdin,
+            outgoing,
             incoming,
             transcript: reviewer.transcript.clone(),
             events: reviewer.events.clone(),
@@ -250,10 +263,10 @@ impl Connection {
 
     fn send(&mut self, message: &Value) -> Result<(), String> {
         let _ = writeln!(self.transcript.lock().unwrap(), "{message}");
-        // A write only fails when Codex is gone, as when a session kept
-        // between rounds has died; say that.
-        writeln!(self.stdin, "{message}")
-            .and_then(|()| self.stdin.flush())
+        // The writer only stops when Codex is gone, as when a session
+        // kept between rounds has died; say that.
+        self.outgoing
+            .send(message.to_string())
             .map_err(|_| self.closed())
     }
 
