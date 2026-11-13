@@ -62,9 +62,10 @@ pub fn launch_args(agent: &AgentDef) -> io::Result<Vec<String>> {
         "host",
         "--permission-prompt-tool",
         "stdio",
-        // The user's own settings could pre-approve tools past the gate.
+        // User settings carry the user's usual model. Project and local
+        // settings stay out; `--tools` is the boundary either way.
         "--setting-sources",
-        "",
+        "user",
         "--strict-mcp-config",
         "--tools",
     ]

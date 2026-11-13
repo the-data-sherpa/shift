@@ -64,7 +64,12 @@ impl Translator {
             Some("result") => {
                 let is_error = frame["is_error"] == true;
                 if is_error {
-                    out.events.push(Event::Error(text_of(&frame["result"])));
+                    // A failed execution has `errors` instead of `result`.
+                    let text = match frame["result"].as_str() {
+                        Some(text) => text.to_owned(),
+                        None => text_of(&frame["errors"]),
+                    };
+                    out.events.push(Event::Error(text));
                 }
                 out.events.push(Event::TurnDone { is_error });
             }
@@ -112,13 +117,13 @@ fn string(value: &Value) -> String {
     value.as_str().unwrap_or_default().to_owned()
 }
 
-/// Tool output is either a string or a list of content blocks.
+/// A string, or a list of strings or text content blocks.
 fn text_of(value: &Value) -> String {
     match value {
         Value::String(text) => text.clone(),
         Value::Array(blocks) => blocks
             .iter()
-            .filter_map(|b| b["text"].as_str())
+            .filter_map(|b| b.as_str().or(b["text"].as_str()))
             .collect::<Vec<_>>()
             .join("\n"),
         _ => String::new(),

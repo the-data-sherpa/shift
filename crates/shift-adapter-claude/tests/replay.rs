@@ -85,9 +85,18 @@ fn failed_turn_reports_the_error() {
         events,
         [
             Event::Error("Not logged in".into()),
-            Event::TurnDone { is_error: true }
+            Event::TurnDone { is_error: true },
         ]
     );
+
+    let result = json!({
+        "type": "result",
+        "subtype": "error_during_execution",
+        "is_error": true,
+        "errors": ["first", "second"],
+    });
+    let (events, _) = replay(&result.to_string());
+    assert_eq!(events[0], Event::Error("first\nsecond".into()));
 }
 
 #[test]
