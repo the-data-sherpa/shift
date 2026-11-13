@@ -30,6 +30,8 @@ pub enum Item {
 
 pub struct Conversation {
     cwd: PathBuf,
+    /// The session's `shift/<slug>` work branch.
+    branch: Option<String>,
     session: Option<Box<dyn Session>>,
     pub items: Vec<Item>,
     input: Entity<InputState>,
@@ -40,6 +42,7 @@ impl Conversation {
     /// `started` is the coder session, or why it could not start.
     pub fn new(
         cwd: PathBuf,
+        branch: Option<String>,
         started: std::io::Result<(Box<dyn Session>, Receiver<Event>)>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -79,6 +82,7 @@ impl Conversation {
 
         Self {
             cwd,
+            branch,
             session,
             items,
             input,
@@ -224,7 +228,13 @@ impl Render for Conversation {
                             .text_sm()
                             .text_color(theme.muted_foreground)
                             .child(self.cwd.display().to_string()),
-                    ),
+                    )
+                    .children(self.branch.clone().map(|branch| {
+                        div()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(branch)
+                    })),
             )
             .child(
                 v_flex()
@@ -271,7 +281,9 @@ mod tests {
         let session: Box<dyn Session> = Box::new(FakeSession(sent.clone()));
         let (window, view) = cx.update(|cx| {
             gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
-                cx.new(|cx| Conversation::new("/repo".into(), Ok((session, receiver)), window, cx))
+                cx.new(|cx| {
+                    Conversation::new("/repo".into(), None, Ok((session, receiver)), window, cx)
+                })
             })
             .unwrap()
         });
