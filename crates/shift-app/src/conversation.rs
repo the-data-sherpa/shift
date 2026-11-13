@@ -150,10 +150,14 @@ impl Conversation {
     }
 }
 
-/// A one-line view of a tool call's input: the command for a shell call,
-/// otherwise the JSON.
+/// A one-line view of a tool call's input: a shell command, a file path, or
+/// a `delegate_task` intent; otherwise the JSON.
 fn tool_input(input: &Value) -> String {
-    match input["command"].as_str().or(input["file_path"].as_str()) {
+    match input["command"]
+        .as_str()
+        .or(input["file_path"].as_str())
+        .or(input["intent"].as_str())
+    {
         Some(text) => text.to_owned(),
         None => input.to_string(),
     }

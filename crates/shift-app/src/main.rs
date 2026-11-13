@@ -5,11 +5,14 @@ mod conversation;
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 use async_channel::Receiver;
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::*;
 use shift_adapter_claude::ClaudeAdapter;
+use shift_core::delegate::StubReviewer;
 use shift_core::{
     Adapter, Event, Session, WorkBranch, builtin_agent, new_session_dir, start_work_branch,
 };
@@ -22,7 +25,16 @@ fn start_coder(cwd: &Path) -> io::Result<(WorkBranch, Box<dyn Session>, Receiver
     let coder = builtin_agent("coder").map_err(io::Error::other)?;
     let (id, transcript_dir) = new_session_dir()?;
     let work = start_work_branch(cwd, &id[..8])?;
-    let (session, events) = ClaudeAdapter.start(&coder, cwd, &transcript_dir)?;
+    // Until the reviewer exists, `delegate_task` is a stub that waits
+    // `SHIFT_STUB_REVIEW_SECS` (default 5) and returns a canned review.
+    let wait = std::env::var("SHIFT_STUB_REVIEW_SECS")
+        .ok()
+        .and_then(|secs| secs.parse().ok())
+        .unwrap_or(5);
+    let tools = Arc::new(StubReviewer {
+        wait: Duration::from_secs(wait),
+    });
+    let (session, events) = ClaudeAdapter.start(&coder, cwd, &transcript_dir, tools)?;
     Ok((work, session, events))
 }
 

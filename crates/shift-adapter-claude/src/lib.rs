@@ -11,12 +11,15 @@ use std::sync::{Arc, Mutex};
 
 use async_channel::{Receiver, Sender};
 use serde_json::{Value, json};
-use shift_core::{Adapter, AgentDef, Event, Harness, Session};
+use shift_core::{Adapter, AgentDef, Event, Harness, Session, ToolServer};
 
-pub use translate::{Output, Translator};
+pub use translate::{Output, SERVER, ToolCall, Translator, tool_reply};
 
 /// File name of the raw Claude NDJSON inside a session's transcript directory.
 pub const TRANSCRIPT: &str = "coder.claude.ndjson";
+
+/// Claude's limit on one MCP tool call, in milliseconds: 30 minutes.
+const TOOL_TIMEOUT_MS: &str = "1800000";
 
 /// The Claude built-in tools behind each shift tool name.
 const TOOL_MAP: &[(&str, &[&str])] = &[
@@ -72,6 +75,9 @@ pub fn launch_args(agent: &AgentDef) -> io::Result<Vec<String>> {
     .map(String::from)
     .into();
     args.push(tools.join(","));
+    // shift's tools are served in-process over the control channel.
+    args.push("--mcp-config".into());
+    args.push(json!({"mcpServers": {SERVER: {"type": "sdk", "name": SERVER}}}).to_string());
     args.push("--append-system-prompt".into());
     args.push(agent.prompt.clone());
     if let Some(model) = &agent.model {
@@ -93,11 +99,14 @@ impl Adapter for ClaudeAdapter {
         agent: &AgentDef,
         cwd: &Path,
         transcript_dir: &Path,
+        tools: Arc<dyn ToolServer>,
     ) -> io::Result<(Box<dyn Session>, Receiver<Event>)> {
         let mut transcript = File::create(transcript_dir.join(TRANSCRIPT))?;
         let mut child = Command::new(Harness::ClaudeCode.binary())
             .args(launch_args(agent)?)
             .current_dir(cwd)
+            // A review blocks its tool call for up to 15 minutes.
+            .env("MCP_TOOL_TIMEOUT", TOOL_TIMEOUT_MS)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -106,8 +115,17 @@ impl Adapter for ClaudeAdapter {
         let stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
         let (events, receiver) = async_channel::unbounded();
 
+        write_frame(
+            &stdin,
+            &json!({
+                "type": "control_request",
+                "request_id": "shift-init",
+                "request": {"subtype": "initialize", "sdkMcpServers": [SERVER]},
+            }),
+        )?;
+
         let writer = stdin.clone();
-        let mut translator = Translator::new(agent.clone());
+        let mut translator = Translator::new(agent.clone(), &tools.tools());
         std::thread::spawn(move || {
             for line in stdout.lines() {
                 let Ok(line) = line else { break };
@@ -128,6 +146,14 @@ impl Adapter for ClaudeAdapter {
                 }
                 for event in output.events {
                     send(&events, event);
+                }
+                for call in output.calls {
+                    let (tools, writer) = (tools.clone(), writer.clone());
+                    std::thread::spawn(move || {
+                        let result = tools.call(&call.name, call.arguments.clone());
+                        // Claude may have exited while the tool ran.
+                        let _ = write_frame(&writer, &tool_reply(&call, result));
+                    });
                 }
             }
             send(&events, Event::Closed);

@@ -1,9 +1,10 @@
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_channel::Receiver;
 
-use crate::{AgentDef, Event, Harness};
+use crate::{AgentDef, Event, Harness, ToolServer};
 
 /// One agent's conversation inside one harness.
 pub trait Session: Send {
@@ -16,12 +17,14 @@ pub trait Adapter {
     fn harness(&self) -> Harness;
 
     /// Start `agent` in `cwd`. Raw harness output is saved under
-    /// `transcript_dir`; translated events arrive on the receiver.
+    /// `transcript_dir`; translated events arrive on the receiver. The agent
+    /// can call the shift tools in `tools`.
     fn start(
         &self,
         agent: &AgentDef,
         cwd: &Path,
         transcript_dir: &Path,
+        tools: Arc<dyn ToolServer>,
     ) -> io::Result<(Box<dyn Session>, Receiver<Event>)>;
 }
 
