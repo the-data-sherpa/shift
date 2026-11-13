@@ -46,6 +46,8 @@ pub struct CodexReviewer {
     transcript: Arc<Mutex<File>>,
     /// The reviewer session, for the read-only reviewer pane.
     events: Sender<Event>,
+    /// The running app-server, kept between rounds.
+    session: Mutex<Option<Connection>>,
 }
 
 impl CodexReviewer {
@@ -62,12 +64,29 @@ impl CodexReviewer {
             target_dir,
             transcript: Arc::new(Mutex::new(transcript)),
             events,
+            session: Mutex::new(None),
         })
     }
 }
 
 impl Reviewer for CodexReviewer {
     fn review(&self, worktree: &Path, brief: &str) -> Result<String, String> {
+        let mut session = self.session.lock().unwrap();
+        // Later rounds are new turns on the same thread. A session that
+        // failed is not reused: the next round starts a fresh one.
+        let mut codex = match session.take() {
+            Some(codex) => codex,
+            None => self.start(worktree)?,
+        };
+        let reply = codex.turn(worktree, brief, &self.target_dir)?;
+        *session = Some(codex);
+        Ok(reply)
+    }
+}
+
+impl CodexReviewer {
+    /// Start `codex app-server` and the reviewer's thread on the latest Sol.
+    fn start(&self, worktree: &Path) -> Result<Connection, String> {
         let mut codex = Connection::open(self)?;
         let family = self
             .agent
@@ -110,21 +129,7 @@ impl Reviewer for CodexReviewer {
                 thread["model"]
             ));
         }
-
-        codex.request(
-            "turn/start",
-            json!({
-                "threadId": codex.thread,
-                "input": [{"type": "text", "text": brief}],
-                "outputSchema": review_schema(),
-                "sandboxPolicy": {
-                    "type": "workspaceWrite",
-                    "writableRoots": [self.target_dir],
-                    "networkAccess": false,
-                },
-            }),
-        )?;
-        codex.finish_turn()
+        Ok(codex)
     }
 }
 
@@ -220,6 +225,26 @@ impl Connection {
             }
             self.refuse_request(&message)?;
         }
+    }
+
+    /// Run one review turn in `worktree`, this round's snapshot, and return
+    /// the reviewer's final message.
+    fn turn(&mut self, worktree: &Path, brief: &str, target_dir: &Path) -> Result<String, String> {
+        self.request(
+            "turn/start",
+            json!({
+                "threadId": self.thread,
+                "input": [{"type": "text", "text": brief}],
+                "outputSchema": review_schema(),
+                "cwd": worktree,
+                "sandboxPolicy": {
+                    "type": "workspaceWrite",
+                    "writableRoots": [target_dir],
+                    "networkAccess": false,
+                },
+            }),
+        )?;
+        self.finish_turn()
     }
 
     /// Wait for the running turn to end and return its final message.

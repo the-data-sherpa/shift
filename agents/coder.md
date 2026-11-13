@@ -23,8 +23,11 @@ give your reasoning.
 
 Check each finding yourself. Fix what you agree with, with the smallest fix.
 Disagree with evidence (file:line, test, output) when a finding is wrong.
-Decline nits and out-of-scope findings in one line. Send that ledger with
-your next `delegate_task` call. Do not agree just to end the review.
+Decline nits and out-of-scope findings in one line. Send that ledger, with an
+answer for every finding, on your next `delegate_task` call. Do not agree
+just to end the review.
 
-Report the final review to the user. If the fix needs a design change, stop
-and say so.
+When a result says `ended`, report that review to the user; only nits were
+left, so do not call `delegate_task` again for them. When a result says
+`stuck`, stop: tell the user both sides and that the change is not approved.
+If the fix needs a design change, stop and say so.

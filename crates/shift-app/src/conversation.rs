@@ -1,6 +1,7 @@
 //! The conversation view: a live coder pane, the input that feeds it, and a
 //! read-only reviewer pane.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use async_channel::Receiver;
@@ -11,7 +12,13 @@ use gpui_kit::component::{
 };
 use gpui_kit::*;
 use serde_json::Value;
+use shift_core::delegate::LedgerEntry;
+use shift_core::history::{Entry, History, Stuck};
+use shift_core::review::RoundResult;
 use shift_core::{Event, Session};
+
+/// `delegate_task` as Claude names it.
+const DELEGATE_TASK: &str = "mcp__shift__delegate_task";
 
 /// One entry in a pane.
 #[derive(Debug, Clone, PartialEq)]
@@ -26,6 +33,8 @@ pub enum Item {
         result: Option<(String, bool)>,
     },
     Error(String),
+    /// The review ended Stuck. shift shows both sides itself.
+    Stuck(Stuck),
 }
 
 pub struct Conversation {
@@ -36,6 +45,10 @@ pub struct Conversation {
     pub items: Vec<Item>,
     /// The reviewer session. You talk to the coder; the coder talks to it.
     pub reviewer_items: Vec<Item>,
+    /// Each finding's history across rounds, shown in the reviewer pane.
+    pub history: History,
+    /// `delegate_task` calls that have not returned, by tool call id.
+    reviewing: HashMap<String, Value>,
     input: Entity<InputState>,
     scroll: ScrollHandle,
     reviewer_scroll: ScrollHandle,
@@ -70,7 +83,9 @@ impl Conversation {
                             if event == Event::Closed {
                                 this.session = None;
                             }
+                            let stuck = this.track_review(&event);
                             apply(&mut this.items, event, "coder");
+                            this.items.extend(stuck.map(Item::Stuck));
                             this.scroll.scroll_to_bottom();
                             cx.notify();
                         });
@@ -108,9 +123,54 @@ impl Conversation {
             session,
             items,
             reviewer_items: Vec::new(),
+            history: History::default(),
+            reviewing: HashMap::new(),
             input,
             scroll: ScrollHandle::new(),
             reviewer_scroll: ScrollHandle::new(),
+        }
+    }
+
+    /// Follow `delegate_task` calls through the coder's events: a returned
+    /// round updates the finding history, and Stuck is handed back to show.
+    fn track_review(&mut self, event: &Event) -> Option<Stuck> {
+        match event {
+            Event::ToolCall { id, name, input } if name == DELEGATE_TASK => {
+                self.reviewing.insert(id.clone(), input.clone());
+                None
+            }
+            Event::ToolResult {
+                id,
+                output,
+                is_error,
+            } => {
+                let input = self.reviewing.remove(id)?;
+                if *is_error {
+                    // A failed review changed nothing.
+                    return None;
+                }
+                // Once Stuck, shift repeats the same result and runs no more
+                // rounds, so the history is final.
+                if self.items.iter().any(|item| matches!(item, Item::Stuck(_))) {
+                    return serde_json::from_str(output).ok();
+                }
+                let ledger: Vec<LedgerEntry> =
+                    serde_json::from_value(input["ledger"].clone()).unwrap_or_default();
+                // shift already accepted this ledger, so it fits the history.
+                let _ = self.history.answer(&ledger);
+                if let Ok(stuck) = serde_json::from_str::<Stuck>(output) {
+                    // A dispute ends in Stuck on a completed round.
+                    if let Some(review) = &stuck.review {
+                        self.history.review(review);
+                    }
+                    return Some(stuck);
+                }
+                if let Ok(round) = serde_json::from_str::<RoundResult>(output) {
+                    self.history.review(&round.review);
+                }
+                None
+            }
+            _ => None,
         }
     }
 
@@ -234,6 +294,77 @@ fn render_items(items: &[Item], theme: &Theme) -> Vec<Div> {
                         .child(head(output)),
                 }),
             Item::Error(text) => div().text_color(theme.danger).child(text.clone()),
+            Item::Stuck(stuck) => v_flex()
+                .gap_2()
+                .p_2()
+                .rounded(theme.radius)
+                .border_1()
+                .border_color(theme.danger)
+                .child(
+                    div()
+                        .font_semibold()
+                        .text_color(theme.danger)
+                        .child(format!("Stuck: {} This is not an approval.", stuck.stuck)),
+                )
+                .children(stuck.disputes.iter().map(|dispute| {
+                    v_flex()
+                        .gap_1()
+                        .child(div().font_semibold().child(format!(
+                            "{} {}",
+                            dispute.id,
+                            location(&dispute.file, dispute.line)
+                        )))
+                        .child(div().child(format!("Reviewer: {}", dispute.reviewer)))
+                        .children(
+                            dispute
+                                .coder
+                                .iter()
+                                .map(|reply| div().child(format!("Coder: {reply}"))),
+                        )
+                })),
+        })
+        .collect()
+}
+
+fn location(file: &str, line: Option<u32>) -> String {
+    match line {
+        Some(line) => format!("{file}:{line}"),
+        None => file.to_owned(),
+    }
+}
+
+/// Each finding with what happened to it, round by round.
+fn render_history(history: &History, theme: &Theme) -> Vec<Div> {
+    history
+        .findings
+        .iter()
+        .map(|finding| {
+            let state = if finding.open { "open" } else { "resolved" };
+            v_flex()
+                .gap_1()
+                .p_2()
+                .rounded(theme.radius)
+                .border_1()
+                .border_color(theme.border)
+                .text_sm()
+                .child(div().font_semibold().child(format!(
+                    "{} {} {} ({state})",
+                    finding.finding.id,
+                    format!("{:?}", finding.finding.severity).to_lowercase(),
+                    location(&finding.finding.file, finding.finding.line),
+                )))
+                .children(finding.log.iter().map(|entry| {
+                    div().text_color(theme.muted_foreground).child(match entry {
+                        Entry::Raised { round, claim } => format!("Round {round}: raised. {claim}"),
+                        Entry::Answered { answer, note } => {
+                            format!("Coder: {}. {note}", answer.label())
+                        }
+                        Entry::StillOpen { round, claim } => {
+                            format!("Round {round}: still open. {claim}")
+                        }
+                        Entry::Resolved { round } => format!("Round {round}: resolved."),
+                    })
+                }))
         })
         .collect()
 }
@@ -292,6 +423,14 @@ impl Render for Conversation {
                         .child(div().font_semibold().child("reviewer"))
                         .child(muted("read-only".into())),
                 )
+                .children((!self.history.findings.is_empty()).then(|| {
+                    v_flex()
+                        .id("finding-history")
+                        .max_h(px(280.))
+                        .gap_2()
+                        .overflow_y_scroll()
+                        .children(render_history(&self.history, theme))
+                }))
                 .child(
                     v_flex()
                         .id("reviewer-pane")
@@ -321,6 +460,8 @@ mod tests {
 
     use gpui::{AppContext, TestAppContext, VisualTestContext, WindowOptions};
     use serde_json::json;
+    use shift_core::delegate::Answer;
+    use shift_core::history::Entry;
     use shift_core::{Event, Session};
 
     // No `use super::*`: GPUI's glob would shadow Rust's `#[test]`.
@@ -416,6 +557,95 @@ mod tests {
                     Item::Agent("Fixed.".into()),
                 ]
             );
+        });
+    }
+
+    #[gpui::test]
+    fn reviews_build_the_finding_history_and_stuck_shows_both_sides(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (events, receiver) = async_channel::unbounded();
+        let (_reviewer_events, reviewer) = async_channel::unbounded();
+        let session: Box<dyn Session> = Box::new(FakeSession(Default::default()));
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| {
+                    let started = Ok((session, receiver));
+                    Conversation::new("/repo".into(), None, started, reviewer, window, cx)
+                })
+            })
+            .unwrap()
+        });
+        let cx = &mut VisualTestContext::from_window(window, cx);
+        let call = |id: &str, ledger: serde_json::Value| Event::ToolCall {
+            id: id.into(),
+            name: "mcp__shift__delegate_task".into(),
+            input: json!({"intent": "i", "ledger": ledger}),
+        };
+        let result = |id: &str, output: serde_json::Value, is_error: bool| Event::ToolResult {
+            id: id.into(),
+            output: output.to_string(),
+            is_error,
+        };
+        let round = json!({
+            "verdict": "changes", "summary": "s", "follow_ups": [], "commands_run": [],
+            "findings": [{"id": "S1", "severity": "should", "file": "a.rs", "line": 3, "claim": "wrong", "fix": "f"}],
+            "round": 1, "rounds_left": 2, "ended": false,
+        });
+        let disagree = json!([{"id": "S1", "answer": "disagree", "note": "see the test"}]);
+        let stuck = json!({
+            "stuck": "A finding is still disputed after two replies.",
+            "disputes": [{"id": "S1", "file": "a.rs", "line": 3, "reviewer": "wrong", "coder": ["disagree: see the test"]}],
+            "next": "Stop.",
+            "review": {
+                "verdict": "changes", "summary": "s", "follow_ups": [], "commands_run": [],
+                "findings": [{"id": "S1", "severity": "should", "file": "a.rs", "line": 3, "claim": "still wrong", "fix": "f"}],
+            },
+        });
+
+        for event in [
+            call("t1", json!(null)),
+            result("t1", round, false),
+            // A failed review changes nothing.
+            call("t2", disagree.clone()),
+            result("t2", json!("the review exceeded its limit"), true),
+            call("t3", disagree.clone()),
+            result("t3", stuck.clone(), false),
+            // Stuck stays Stuck: a further call adds no round to the history.
+            call("t4", disagree),
+            result("t4", stuck, false),
+        ] {
+            events.send_blocking(event).unwrap();
+        }
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            let view = view.read(cx);
+            let finding = &view.history.findings[0];
+            assert_eq!((finding.finding.id.as_str(), finding.open), ("S1", true));
+            assert_eq!(
+                finding.log,
+                [
+                    Entry::Raised {
+                        round: 1,
+                        claim: "wrong".into()
+                    },
+                    Entry::Answered {
+                        answer: Answer::Disagree,
+                        note: "see the test".into()
+                    },
+                    // The round that ended in Stuck is in the history too.
+                    Entry::StillOpen {
+                        round: 2,
+                        claim: "still wrong".into()
+                    },
+                ]
+            );
+            // Stuck is shown by shift itself, after the call that returned it.
+            let Some(Item::Stuck(shown)) = view.items.last() else {
+                panic!("no Stuck item: {:?}", view.items);
+            };
+            assert_eq!(shown.disputes[0].reviewer, "wrong");
+            assert_eq!(shown.disputes[0].coder, ["disagree: see the test"]);
         });
     }
 }

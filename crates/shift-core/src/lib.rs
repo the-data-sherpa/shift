@@ -5,6 +5,7 @@ pub mod delegate;
 pub mod event;
 pub mod git;
 pub mod harness;
+pub mod history;
 pub mod policy;
 pub mod review;
 pub mod session;

@@ -4,7 +4,8 @@
 use std::process::Command;
 
 use shift_adapter_codex::{CodexReviewer, TRANSCRIPT};
-use shift_core::review::{Delegate, UserRequest};
+use shift_core::delegate::ReviewVerdict;
+use shift_core::review::{Delegate, RoundResult, UserRequest};
 use shift_core::{Event, ToolServer, builtin_agent};
 
 fn git(dir: &std::path::Path, args: &[&str]) {
@@ -17,7 +18,7 @@ fn git(dir: &std::path::Path, args: &[&str]) {
 }
 
 #[test]
-fn sol_reviews_a_snapshot_and_returns_a_schema_checked_review() {
+fn sol_reviews_two_rounds_on_one_session() {
     if std::env::var_os("SHIFT_LIVE").is_none() {
         return;
     }
@@ -70,26 +71,58 @@ fn sol_reviews_a_snapshot_and_returns_a_schema_checked_review() {
         Box::new(reviewer),
     );
 
-    let review = delegate
-        .call(
-            "delegate_task",
-            serde_json::json!({
-                "intent": "Add notes.txt",
-                "out_of_scope": "add.py behavior",
-                "change_summary": "Added notes.txt",
-                "checks": "none",
-            }),
-        )
-        .unwrap();
-
-    let review: shift_core::delegate::Review = serde_json::from_str(&review).unwrap();
-    println!("{review:#?}");
+    let arguments = serde_json::json!({
+        "intent": "Add notes.txt",
+        "out_of_scope": "add.py behavior",
+        "change_summary": "Added notes.txt",
+        "checks": "none",
+    });
+    let first = delegate.call("delegate_task", arguments.clone()).unwrap();
+    let first: RoundResult = serde_json::from_str(&first).unwrap();
+    println!("{first:#?}");
     // The reviewer saw the snapshot: the subtraction bug is in add.py.
-    assert_eq!(review.verdict, shift_core::delegate::ReviewVerdict::Changes);
-    assert!(review.findings.iter().any(|f| f.file.contains("add.py")));
+    assert_eq!(first.review.verdict, ReviewVerdict::Changes);
+    assert!(
+        first
+            .review
+            .findings
+            .iter()
+            .any(|f| f.file.contains("add.py"))
+    );
+    assert_eq!((first.round, first.ended), (1, false));
     // The worktree is gone and the coder's checkout is untouched.
     assert!(!dir.join("review-1").exists());
     assert!(repo.join("notes.txt").exists());
+
+    // Round 2: the coder fixes the bug and answers every finding.
+    std::fs::write(repo.join("add.py"), "def add(a, b):\n    return a + b\n").unwrap();
+    let ledger: Vec<_> = first
+        .review
+        .findings
+        .iter()
+        .map(|f| serde_json::json!({"id": f.id, "answer": "fixed", "note": "Restored add.py."}))
+        .collect();
+    let mut arguments = arguments;
+    arguments["ledger"] = ledger.into();
+    let second = delegate.call("delegate_task", arguments).unwrap();
+    let second: RoundResult = serde_json::from_str(&second).unwrap();
+    println!("{second:#?}");
+    // The reviewer saw the new snapshot and resolved its finding.
+    assert_eq!((second.round, second.ended), (2, true));
+    assert!(
+        !second
+            .review
+            .findings
+            .iter()
+            .any(|f| f.file.contains("add.py"))
+    );
+    assert!(!dir.join("review-2").exists());
+
+    // Both rounds ran on one reviewer session: one thread, two turns.
+    let transcript = std::fs::read_to_string(dir.join(TRANSCRIPT)).unwrap();
+    assert_eq!(transcript.matches(r#""method":"thread/start""#).count(), 1);
+    assert_eq!(transcript.matches(r#""method":"turn/start""#).count(), 2);
+
     let mut seen = Vec::new();
     while let Ok(event) = receiver.try_recv() {
         seen.push(event);
@@ -99,6 +132,5 @@ fn sol_reviews_a_snapshot_and_returns_a_schema_checked_review() {
         "{seen:?}"
     );
     assert!(seen.contains(&Event::TurnDone { is_error: false }));
-    assert!(std::fs::metadata(dir.join(TRANSCRIPT)).unwrap().len() > 0);
     println!("transcript: {}", dir.join(TRANSCRIPT).display());
 }
