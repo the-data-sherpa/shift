@@ -24,6 +24,8 @@ pub struct ToolCall {
     mcp_id: Value,
     pub name: String,
     pub arguments: Value,
+    /// Claude's id for the tool use, as in its `Event::ToolCall`.
+    pub call_id: String,
 }
 
 /// The name Claude gives the in-process shift MCP server.
@@ -139,6 +141,7 @@ impl Translator {
                             mcp_id: message["id"].clone(),
                             name: string(&message["params"]["name"]),
                             arguments: message["params"]["arguments"].clone(),
+                            call_id: string(&message["params"]["_meta"]["claudecode/toolUseId"]),
                         });
                         return;
                     }

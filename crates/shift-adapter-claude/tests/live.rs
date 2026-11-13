@@ -5,15 +5,17 @@ use shift_adapter_claude::{ClaudeAdapter, TRANSCRIPT};
 use shift_core::delegate::delegate_task_spec;
 use shift_core::{Adapter, Event, ToolServer, ToolSpec, builtin_agent};
 
-/// Stands in for the reviewer: blocks briefly, then answers.
-struct SlowTool;
+/// Stands in for the reviewer: blocks briefly, then answers. It records
+/// the id each call arrived with.
+struct SlowTool(std::sync::Mutex<Vec<String>>);
 
 impl ToolServer for SlowTool {
     fn tools(&self) -> Vec<ToolSpec> {
         vec![delegate_task_spec()]
     }
 
-    fn call(&self, _: &str, _: serde_json::Value) -> Result<String, String> {
+    fn call(&self, _: &str, _: serde_json::Value, call_id: &str) -> Result<String, String> {
+        self.0.lock().unwrap().push(call_id.to_owned());
         std::thread::sleep(std::time::Duration::from_secs(1));
         Ok(r#"{"verdict":"approve"}"#.into())
     }
@@ -29,8 +31,10 @@ fn coder_runs_a_shell_command_through_the_gate() {
     std::fs::create_dir_all(&repo).unwrap();
 
     let coder = builtin_agent("coder").unwrap();
-    let tools = std::sync::Arc::new(SlowTool);
-    let (session, events) = ClaudeAdapter.start(&coder, &repo, &dir, tools).unwrap();
+    let tools = std::sync::Arc::new(SlowTool(Default::default()));
+    let (session, events) = ClaudeAdapter
+        .start(&coder, &repo, &dir, tools.clone())
+        .unwrap();
     session
         .send(
             "Run `echo shift-live > out.txt` with Bash, then call delegate_task with short \
@@ -73,5 +77,16 @@ fn coder_runs_a_shell_command_through_the_gate() {
         "shift-live"
     );
     assert!(std::fs::metadata(dir.join(TRANSCRIPT)).unwrap().len() > 0);
+    // The id a shift tool call arrives with is the one its event carries,
+    // so the Cancel review button can name the call it is shown for.
+    let shown: Vec<&String> = seen
+        .iter()
+        .filter_map(|e| match e {
+            Event::ToolCall { id, name, .. } if name == "mcp__shift__delegate_task" => Some(id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(shown, tools.0.lock().unwrap().iter().collect::<Vec<_>>());
+    assert_eq!(shown.len(), 1);
     println!("transcript: {}", dir.join(TRANSCRIPT).display());
 }

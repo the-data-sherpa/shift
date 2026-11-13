@@ -14,7 +14,8 @@ use shift_adapter_claude::ClaudeAdapter;
 use shift_adapter_codex::CodexReviewer;
 use shift_core::review::{Delegate, UserRequest};
 use shift_core::{
-    Adapter, Event, Session, builtin_agent, new_session_dir, start_work_branch, state_dir,
+    Adapter, Cancel, Cancellable, Event, Session, builtin_agent, new_session_dir,
+    start_work_branch, state_dir,
 };
 
 use conversation::Conversation;
@@ -49,7 +50,7 @@ impl Session for Recording {
 /// Start the coder session in `cwd` on its own work branch, with
 /// `delegate_task` backed by the reviewer. Transcripts are saved under a new
 /// session directory. A dirty working tree is refused.
-fn start_coder(cwd: &Path) -> io::Result<Started> {
+fn start_coder(cwd: &Path, cancel: Cancel) -> io::Result<Started> {
     let agent = |name| builtin_agent(name).map_err(io::Error::other);
     let (id, session_dir) = new_session_dir()?;
     let work = start_work_branch(cwd, &id[..8])?;
@@ -67,11 +68,16 @@ fn start_coder(cwd: &Path) -> io::Result<Started> {
             state_dir()?.join("reviewer-target"),
             &session_dir,
             reviewer_events,
+            cancel.clone(),
         )?),
     );
 
-    let (session, events) =
-        ClaudeAdapter.start(&agent("coder")?, cwd, &session_dir, Arc::new(delegate))?;
+    // Each `delegate_task` call is one review the user can cancel.
+    let tools = Arc::new(Cancellable {
+        tools: delegate,
+        cancel,
+    });
+    let (session, events) = ClaudeAdapter.start(&agent("coder")?, cwd, &session_dir, tools)?;
     Ok(Started {
         branch: work.branch,
         coder: (Box::new(Recording { session, request }), events),
@@ -90,7 +96,9 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let (branch, started, reviewer) = match start_coder(&cwd) {
+    // The Cancel review button and the reviewer share this.
+    let cancel = Cancel::default();
+    let (branch, started, reviewer) = match start_coder(&cwd, cancel.clone()) {
         Ok(started) => (Some(started.branch), Ok(started.coder), started.reviewer),
         // No session: the reviewer pane stays empty.
         Err(e) => (None, Err(e), async_channel::unbounded().1),
@@ -112,7 +120,9 @@ fn main() {
                 ..Default::default()
             },
             cx,
-            |window, cx| cx.new(|cx| Conversation::new(cwd, branch, started, reviewer, window, cx)),
+            |window, cx| {
+                cx.new(|cx| Conversation::new(cwd, branch, started, reviewer, cancel, window, cx))
+            },
         )
         .expect("failed to open window");
         cx.activate(true);

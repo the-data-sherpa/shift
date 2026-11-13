@@ -6,7 +6,7 @@ use std::process::Command;
 use shift_adapter_codex::{CodexReviewer, TRANSCRIPT};
 use shift_core::delegate::ReviewVerdict;
 use shift_core::review::{Delegate, RoundResult, UserRequest};
-use shift_core::{Event, ToolServer, builtin_agent};
+use shift_core::{Cancel, Cancellable, Event, ToolServer, builtin_agent};
 
 fn git(dir: &std::path::Path, args: &[&str]) {
     let status = Command::new("git")
@@ -59,6 +59,7 @@ fn sol_reviews_two_rounds_on_one_session() {
         dir.join("target"),
         &dir,
         events,
+        Cancel::default(),
     )
     .unwrap();
     let request = UserRequest::default();
@@ -77,7 +78,9 @@ fn sol_reviews_two_rounds_on_one_session() {
         "change_summary": "Added notes.txt",
         "checks": "none",
     });
-    let first = delegate.call("delegate_task", arguments.clone()).unwrap();
+    let first = delegate
+        .call("delegate_task", arguments.clone(), "t1")
+        .unwrap();
     let first: RoundResult = serde_json::from_str(&first).unwrap();
     println!("{first:#?}");
     // The reviewer saw the snapshot: the subtraction bug is in add.py.
@@ -104,7 +107,7 @@ fn sol_reviews_two_rounds_on_one_session() {
         .collect();
     let mut arguments = arguments;
     arguments["ledger"] = ledger.into();
-    let second = delegate.call("delegate_task", arguments).unwrap();
+    let second = delegate.call("delegate_task", arguments, "t2").unwrap();
     let second: RoundResult = serde_json::from_str(&second).unwrap();
     println!("{second:#?}");
     // The reviewer saw the new snapshot and resolved its finding.
@@ -133,4 +136,77 @@ fn sol_reviews_two_rounds_on_one_session() {
     );
     assert!(seen.contains(&Event::TurnDone { is_error: false }));
     println!("transcript: {}", dir.join(TRANSCRIPT).display());
+}
+
+#[test]
+fn cancelling_a_real_review_stops_codex_and_returns_cancelled_by_user() {
+    if std::env::var_os("SHIFT_LIVE").is_none() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("shift-codex-cancel-{}", std::process::id()));
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "--quiet"]);
+    std::fs::write(repo.join("add.py"), "def add(a, b):\n    return a + b\n").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.com",
+            "commit",
+            "-qm",
+            "init",
+        ],
+    );
+    std::fs::write(repo.join("add.py"), "def add(a, b):\n    return a - b\n").unwrap();
+
+    let (events, receiver) = async_channel::unbounded();
+    let cancel = Cancel::default();
+    let reviewer = CodexReviewer::new(
+        builtin_agent("reviewer").unwrap(),
+        dir.join("target"),
+        &dir,
+        events,
+        cancel.clone(),
+    )
+    .unwrap();
+    let request = UserRequest::default();
+    *request.lock().unwrap() = Some("Review add.py thoroughly.".into());
+    let delegate = Delegate::new(
+        repo.clone(),
+        "HEAD".into(),
+        dir.clone(),
+        request,
+        Box::new(reviewer),
+    );
+    // Wired as the app wires it: each call is one cancellable review.
+    let delegate = Cancellable {
+        tools: delegate,
+        cancel: cancel.clone(),
+    };
+
+    // Press Cancel review once the reviewer is visibly at work.
+    let button = std::thread::spawn(move || {
+        let first = receiver.recv_blocking();
+        cancel.cancel("t1");
+        first.is_ok()
+    });
+    let started = std::time::Instant::now();
+    let error = delegate
+        .call(
+            "delegate_task",
+            serde_json::json!({
+                "intent": "i", "out_of_scope": "o", "change_summary": "c", "checks": "k",
+            }),
+            "t1",
+        )
+        .unwrap_err();
+
+    assert!(button.join().unwrap(), "the reviewer never started working");
+    assert_eq!(error, "cancelled by user");
+    println!("cancelled after {:?}", started.elapsed());
+    assert!(!dir.join("review-1").exists());
 }

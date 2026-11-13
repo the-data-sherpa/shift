@@ -15,8 +15,10 @@ pub struct ToolSpec {
 pub trait ToolServer: Send + Sync {
     fn tools(&self) -> Vec<ToolSpec>;
 
-    /// Run a tool. `Err` is returned to the agent as a tool error.
-    fn call(&self, name: &str, arguments: Value) -> Result<String, String>;
+    /// Run a tool. `call_id` is the harness's id for this call, the same
+    /// one its `Event::ToolCall` carries. `Err` is returned to the agent as a
+    /// tool error.
+    fn call(&self, name: &str, arguments: Value, call_id: &str) -> Result<String, String>;
 }
 
 pub const DELEGATE_TASK: &str = "delegate_task";
