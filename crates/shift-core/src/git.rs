@@ -21,8 +21,9 @@ pub fn start_work_branch(repo: &Path, slug: &str) -> io::Result<WorkBranch> {
         .map_err(|_| io::Error::other(format!("`{}` is not a git repository", repo.display())))?;
     let base = git(repo, &["rev-parse", "--verify", "HEAD"])
         .map_err(|_| io::Error::other("the repository has no commits yet; make one first"))?;
-    // Untracked, non-ignored files count: a review would include them.
-    if !git(repo, &["status", "--porcelain"])?.is_empty() {
+    // Untracked, non-ignored files count: a review would include them, even
+    // when the user's config hides them from `git status`.
+    if !git(repo, &["status", "--porcelain", "--untracked-files=normal"])?.is_empty() {
         return Err(io::Error::other(
             "the working tree has uncommitted changes; commit or stash first",
         ));
@@ -130,6 +131,19 @@ mod tests {
                 "feature"
             );
         }
+    }
+
+    #[test]
+    fn untracked_files_hidden_by_config_still_refuse() {
+        let temp = repo("hidden");
+        git(&temp.0, &["config", "status.showUntrackedFiles", "no"]).unwrap();
+        std::fs::write(temp.0.join("new.txt"), "x\n").unwrap();
+
+        assert!(start_work_branch(&temp.0, "abc12345").is_err());
+        assert_eq!(
+            git(&temp.0, &["branch", "--show-current"]).unwrap(),
+            "feature"
+        );
     }
 
     #[test]
